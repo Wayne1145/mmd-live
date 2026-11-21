@@ -21,6 +21,8 @@ internal sealed class AvatarRig
         morphs = new(StringComparer.OrdinalIgnoreCase);
     float[] neutral = [];
     readonly Grounding grounding = new();
+    static readonly string[] LeftBlink = ["ウィンク", "ウィンク左", "まばたき左", "blinkleft"];
+    static readonly string[] RightBlink = ["ウィンク右", "まばたき右", "winkright", "blinkright"];
 
     public void ResetPoseOrigin() => grounding.Reset();
 
@@ -168,14 +170,19 @@ internal sealed class AvatarRig
                 if (m.Visibility[a] > .38f && m.Visibility[b] > .38f)
                     Aim(joint, child, p[b] - p[a]);
             }
-            var hip = (p[23] + p[24]) / 2;
-            var shoulder = (p[11] + p[12]) / 2;
             if (
                 m.Visibility[11] > .4f
                 && m.Visibility[12] > .4f
                 && Math.Min(m.Visibility[23], m.Visibility[24]) > .3f
             )
-                Aim(Bone("上半身", "spine"), Bone("首", "neck", "上半身2"), shoulder - hip);
+            {
+                // Image-relative Z is useful for locating limbs but exaggerates a torso seen from below.
+                var torso = m.WorldBody.Length == 33 ? m.WorldBody : p;
+                var up = (torso[11] + torso[12] - torso[23] - torso[24]) / 2;
+                if (m.WorldBody.Length != 33)
+                    up.Z = 0;
+                Aim(Bone("上半身", "spine"), Bone("首", "neck", "上半身2"), up);
+            }
             foreach (bool left in new[] { true, false })
             {
                 string s = left ? "左" : "右",
@@ -212,24 +219,23 @@ internal sealed class AvatarRig
             if (i >= 0)
                 want[i] = Math.Max(want[i], amount);
         }
+        int head = Bone("頭", "head");
+        Quaternion? headInCamera = null;
         if (m.Face.Length == 478)
         {
             var f = m.Face;
             var eyes = f[263] - f[33];
             var vertical = f[152] - f[10];
             var yaw = MathF.Atan2(eyes.Z, Math.Max(1, Math.Abs(eyes.X)));
-            var pitch = MathF.Atan2(vertical.Z, Math.Max(1, Math.Abs(vertical.Y)));
+            var pitch = -MathF.Atan2(vertical.Z, Math.Max(1, Math.Abs(vertical.Y)));
             var roll = MathF.Atan2(eyes.Y, eyes.X);
-            Rotate(Bone("頭", "head"), Quaternion.CreateFromYawPitchRoll(yaw, pitch, roll));
+            headInCamera = Quaternion.CreateFromYawPitchRoll(yaw, pitch, roll);
             float blinkL = E(9),
                 blinkR = E(10);
-            if (
-                Lookup(morphs, ["ウィンク", "ウィンク左", "blinkleft"]) >= 0
-                && Lookup(morphs, ["ウィンク右", "winkright", "blinkright"]) >= 0
-            )
+            if (Lookup(morphs, LeftBlink) >= 0 && Lookup(morphs, RightBlink) >= 0)
             {
-                Morph(blinkL, "ウィンク", "ウィンク左", "blinkleft");
-                Morph(blinkR, "ウィンク右", "winkright", "blinkright");
+                Morph(blinkL, LeftBlink);
+                Morph(blinkR, RightBlink);
             }
             else
                 Morph(Math.Max(blinkL, blinkR), "まばたき", "瞬き", "blink", "eyesclosed");
@@ -356,6 +362,9 @@ internal sealed class AvatarRig
             int parent = b.ParentIndex;
             var parentQ = parent < 0 ? Quaternion.Identity : global[parent];
             var target = targets[i];
+            // The face mesh already measures the head in the camera frame, including torso motion.
+            if (i == head && headInCamera is { } orientation)
+                target = Quaternion.Inverse(parentQ) * orientation * target;
             if (absolute.TryGetValue(i, out var aim))
                 target = FromTo(
                     aim.rest,

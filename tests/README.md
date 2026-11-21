@@ -8,6 +8,7 @@
 ./scripts/dotnet.ps1 run --no-build -c Release --project src/MmdLive -- --probe --image ./local/pose.jpg --full --repeat 12 --out ./artifacts/pose
 ./scripts/dotnet.ps1 run --no-build -c Release --project tests/MmdLive.Checks -- light ./assets/studio/StudioPilot.pmx ./artifacts/pose
 ./scripts/dotnet.ps1 run --no-build -c Release --project tests/MmdLive.Checks -- video ./local/thanks.mkv ./local/thanks-1440.avi
+./scripts/dotnet.ps1 run --no-build -c Release --project tests/MmdLive.Checks -- upright ./local/thanks-1440.avi ./assets/models
 ```
 
 用于端到端回放时，运行发布版 `MmdLive.exe --studio --video <路径> --metrics <结果目录> --seconds 1800`。结果文件 `playback.json` 每十秒更新，包含真实输入分辨率、画面提交帧率、姿态更新频率和 P95 延迟。延迟从解码帧可用开始计时，到该帧姿态的画面提交结束。单帧静态模式额外导出 RGB 关键点叠图和带透明通道的角色图。

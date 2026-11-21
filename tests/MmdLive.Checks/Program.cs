@@ -1,3 +1,4 @@
+using System.Numerics;
 using System.Text.Json;
 using MmdLive.Rendering;
 using MmdLive.Rig;
@@ -19,6 +20,9 @@ internal static class Check
         {
             case "contracts":
                 Contracts(args[1]);
+                break;
+            case "upright":
+                UprightPlayback(args[1], args[2]);
                 break;
             case "video":
                 using (var input = new VideoCapture(args[1], VideoCaptureAPIs.FFMPEG))
@@ -83,7 +87,7 @@ internal static class Check
                 }
                 break;
             default:
-                throw new ArgumentException("video, alpha, blank or light");
+                throw new ArgumentException("contracts, upright, video, alpha, blank or light");
         }
     }
 
@@ -166,11 +170,72 @@ internal static class Check
             !Tracking.Tracker.AssignHands([right], body, visibility).Single().Left,
             "distant wrists preserve the hand classifier"
         );
+        CheckHeadAndSpine(character, motion);
         character.Calibrate(motion);
         character.Apply(motion, false, 1);
         Require(Weight("ウィンク") == 0 && Weight("あ") == 0, "neutral calibration");
         Console.WriteLine(
             "PMX import, neutral skin, facial morphs, hand sides, calibration and camera modes passed."
+        );
+    }
+
+    static void CheckHeadAndSpine(AvatarRig rig, Tracking.Motion motion)
+    {
+        var body = new Vector3[33];
+        body[11] = body[12] = new(0, -600, -650);
+        var world = new Vector3[33];
+        world[11] = world[12] = new(0, -.4f, 0);
+        var sample = motion with
+        {
+            Body = body,
+            WorldBody = world,
+            Visibility = Enumerable.Repeat(1f, 33).ToArray(),
+        };
+        int spine = rig.Model.Bones.FindIndex(b => b.Name == "上半身");
+        int head = rig.Model.Bones.FindIndex(b => b.Name == "頭");
+        rig.Apply(sample, false, 1);
+        Require(
+            Vector3.Distance(Vector3.TransformNormal(Vector3.UnitY, rig.Skin[spine]), Vector3.UnitY)
+                < .001f,
+            "projected hip depth must not bow an upright metric spine"
+        );
+        world[11] = world[12] = new(0, -.4f, -.25f);
+        var face = (Vector3[])sample.Face.Clone();
+        face[152].Z = (face[152].Y - face[10].Y) / 2;
+        rig.Apply(sample with { Face = face }, false, 1);
+        var forward = Vector3.TransformNormal(-Vector3.UnitZ, rig.Skin[head]);
+        Require(
+            Vector3.Distance(forward, Vector3.Normalize(new(0, -.5f, -1))) < .001f,
+            "the measured head nod must remain in camera space above a bent spine"
+        );
+    }
+
+    static void UprightPlayback(string video, string models)
+    {
+        using var input = new VideoCapture(video, VideoCaptureAPIs.FFMPEG);
+        using var frame = new Mat();
+        using var tracker = new Tracking.Tracker(models, GraphicsAdapter.List().First().Index);
+        var rig = new AvatarRig(Program.Demo);
+        int head = rig.Model.Bones.FindIndex(b => b.Name == "頭");
+        for (int i = 0; i < 24; i++)
+        {
+            Require(input.Read(frame) && !frame.Empty(), "missing upright clip frame");
+            var sample = tracker.Track(frame);
+            Require(
+                sample.Face.Length == 478 && sample.WorldBody.Length == 33,
+                $"upright landmarks at frame {i}"
+            );
+            var offset = sample.Face[1] - sample.Body[0];
+            Require(
+                new Vector2(offset.X, offset.Y).Length() < frame.Width * .055f,
+                $"face outside head at frame {i}"
+            );
+            rig.Apply(sample, false, 1);
+            var forward = Vector3.TransformNormal(-Vector3.UnitZ, rig.Skin[head]);
+            Require(-forward.Z > .85f, $"upright actor faces away from the camera at frame {i}");
+        }
+        Console.WriteLine(
+            "Upright face acquisition, detector refresh and head alignment passed on 24 video frames."
         );
     }
 
