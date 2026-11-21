@@ -21,7 +21,12 @@ internal sealed class OcclusionHold
         if (sample.Body.Length > 0)
             bodySeen = now;
         else if (Recent(bodySeen))
-            sample = sample with { Body = previous.Body, Visibility = previous.Visibility };
+            sample = sample with
+            {
+                Body = previous.Body,
+                Visibility = previous.Visibility,
+                WorldBody = previous.WorldBody,
+            };
         foreach (var hand in sample.Hands)
             hands[hand.Left] = (hand, now);
         sample = sample with

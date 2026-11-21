@@ -18,6 +18,8 @@ internal sealed record Motion(
     double Milliseconds
 )
 {
+    // Hip-centered coordinates in meters, rotated back into camera axes.
+    public Vector3[] WorldBody { get; init; } = [];
     public static Motion Empty { get; } = new(1, 1, [], [], [], [], [], 0);
 }
 
@@ -76,8 +78,8 @@ internal sealed class Tracker : IDisposable
         var clock = Stopwatch.StartNew();
         var whole = Crop.Whole(image);
         bool refresh = frames++ % 8 == 0;
-        var (body, visible) = GetBody(image, whole, refresh);
-        var (face, blend) = GetFace(image, whole, body, refresh);
+        var (body, visible, world) = GetBody(image, whole, refresh);
+        var (face, blend) = GetFace(image, whole, body, visible, refresh);
         if (body.Length == 0 && face.Length == 478)
         {
             var chin = XY(face[152]);
@@ -87,7 +89,7 @@ internal sealed class Tracker : IDisposable
             if (length > 12)
             {
                 bodyRegion = new(chin + vertical * 2.05f, length * 6.9f, Crop.Upright(chin, crown));
-                (body, visible) = GetBody(image, whole, false);
+                (body, visible, world) = GetBody(image, whole, false);
             }
         }
         var hands = GetHands(image, whole, body, visible);
@@ -100,10 +102,13 @@ internal sealed class Tracker : IDisposable
             visible,
             hands,
             clock.Elapsed.TotalMilliseconds
-        );
+        )
+        {
+            WorldBody = world,
+        };
     }
 
-    (Vector3[], float[]) GetBody(Mat image, Crop whole, bool refresh)
+    (Vector3[], float[], Vector3[]) GetBody(Mat image, Crop whole, bool refresh)
     {
         if (refresh || bodyRegion is null)
         {
@@ -116,12 +121,12 @@ internal sealed class Tracker : IDisposable
                 );
         }
         if (bodyRegion is not Crop c || c.Side < 8)
-            return ([], []);
-        var raw = pose.Image(image, c, false, "Identity", "Identity_1");
+            return ([], [], []);
+        var raw = pose.Image(image, c, false, "Identity", "Identity_1", "Identity_4");
         if (raw[1][0] < .5f)
         {
             bodyRegion = null;
-            return ([], []);
+            return ([], [], []);
         }
         var points = Project(raw[0], c, pose.Size, 5, 33);
         var vis = new float[33];
@@ -130,62 +135,88 @@ internal sealed class Tracker : IDisposable
                 BlazeDetector.Sigmoid(raw[0][i * 5 + 3]),
                 BlazeDetector.Sigmoid(raw[0][i * 5 + 4])
             );
-        return (points, vis);
+        var world = new Vector3[33];
+        for (int i = 0; i < world.Length; i++)
+        {
+            int k = i * 3;
+            var xy = c.Rotate(new(raw[2][k], raw[2][k + 1]));
+            world[i] = new(xy, raw[2][k + 2]);
+        }
+        return (points, vis, world);
     }
 
-    (Vector3[], float[]) GetFace(Mat image, Crop whole, Vector3[] body, bool refresh)
+    IEnumerable<Crop> FaceCandidates(
+        Mat image,
+        Crop whole,
+        Vector3[] body,
+        float[] visible,
+        bool refresh
+    )
     {
-        if (refresh || faceRegion is null)
+        if (!refresh && faceRegion is Crop tracked)
+            yield return tracked;
+
+        Crop? Detect(Crop search, float threshold)
         {
-            var d = BlazeDetector.Find(faceDetector, image, whole, true, .55f, 1).FirstOrDefault();
-            if (d is null && body.Length > 0)
+            var d = BlazeDetector
+                .Find(faceDetector, image, search, true, threshold, 1)
+                .FirstOrDefault();
+            if (d is null)
+                return null;
+            var eyes = d.Marks[1] - d.Marks[0];
+            return new(d.Center, Math.Max(d.Size.X, d.Size.Y) * 1.5f, MathF.Atan2(eyes.Y, eyes.X));
+        }
+
+        // At full-body distances the global 128px detector can mistake clothing for a face.
+        // Validate each proposal with the mesh before it can displace the tracked performer.
+        if (body.Length == 33 && visible[0] > .4f)
+        {
+            float headWidth = Math.Max(
+                Vector2.Distance(XY(body[7]), XY(body[8])),
+                2.1f * Vector2.Distance(XY(body[2]), XY(body[5]))
+            );
+            if (headWidth > 4)
             {
-                float width = Vector2.Distance(XY(body[7]), XY(body[8]));
-                float headWidth = Math.Max(
-                    width,
-                    2.1f * Vector2.Distance(XY(body[2]), XY(body[5]))
-                );
-                if (headWidth > 4)
-                {
-                    d = BlazeDetector
-                        .Find(
-                            faceDetector,
-                            image,
-                            new Crop(XY(body[0]), headWidth * 3.4f),
-                            true,
-                            .48f,
-                            1
-                        )
-                        .FirstOrDefault();
-                    if (d == null)
-                        faceRegion = new(XY(body[0]), headWidth * 2.1f);
-                }
+                var nose = XY(body[0]);
+                if (Detect(new(nose, headWidth * 3.4f), .48f) is Crop head)
+                    yield return head;
+                yield return new(nose, headWidth * 2.1f);
             }
-            if (d != null)
-                faceRegion = new(
-                    d.Center,
-                    Math.Max(d.Size.X, d.Size.Y) * 1.5f,
-                    MathF.Atan2(d.Marks[1].Y - d.Marks[0].Y, d.Marks[1].X - d.Marks[0].X)
-                );
         }
-        if (faceRegion is not Crop c || c.Side < 8)
-            return ([], []);
-        var raw = mesh.Image(image, c, false, "Identity", "Identity_1");
-        if (BlazeDetector.Sigmoid(raw[1][0]) < .55f)
+        if (Detect(whole, .55f) is Crop global)
+            yield return global;
+        if (refresh && faceRegion is Crop previous)
+            yield return previous;
+    }
+
+    (Vector3[], float[]) GetFace(
+        Mat image,
+        Crop whole,
+        Vector3[] body,
+        float[] visible,
+        bool refresh
+    )
+    {
+        foreach (var c in FaceCandidates(image, whole, body, visible, refresh))
         {
-            faceRegion = null;
-            return ([], []);
+            if (c.Side < 8)
+                continue;
+            var raw = mesh.Image(image, c, false, "Identity", "Identity_1");
+            if (BlazeDetector.Sigmoid(raw[1][0]) < .55f)
+                continue;
+            var points = Project(raw[0], c, mesh.Size, 3, 478);
+            var input = new float[subset.Length * 2];
+            for (int i = 0; i < subset.Length; i++)
+            {
+                input[i * 2] = points[subset[i]].X;
+                input[i * 2 + 1] = points[subset[i]].Y;
+            }
+            var eyes = points[263] - points[33];
+            faceRegion = Bounds(points.Select(XY), MathF.Atan2(eyes.Y, eyes.X), 1.52f, 0);
+            return (points, expressions.Run(input)[0]);
         }
-        var points = Project(raw[0], c, mesh.Size, 3, 478);
-        var input = new float[subset.Length * 2];
-        for (int i = 0; i < subset.Length; i++)
-        {
-            input[i * 2] = points[subset[i]].X;
-            input[i * 2 + 1] = points[subset[i]].Y;
-        }
-        var angle = MathF.Atan2(points[263].Y - points[33].Y, points[263].X - points[33].X);
-        faceRegion = Bounds(points.Select(XY), angle, 1.52f, 0);
-        return (points, expressions.Run(input)[0]);
+        faceRegion = null;
+        return ([], []);
     }
 
     Hand[] GetHands(Mat image, Crop whole, Vector3[] body, float[] visible)
