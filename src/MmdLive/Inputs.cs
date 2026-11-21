@@ -17,73 +17,6 @@ internal enum SourceKind
 
 internal sealed record Source(SourceKind Kind, string Path, int CameraIndex = 0);
 
-internal static class CameraDevices
-{
-    [DllImport("mfplat.dll")]
-    static extern int MFStartup(int version, int flags);
-
-    [DllImport("mfplat.dll")]
-    static extern int MFShutdown();
-
-    [DllImport("mfplat.dll")]
-    static extern int MFCreateAttributes(out nint attributes, int count);
-
-    [DllImport("mf.dll")]
-    static extern int MFEnumDeviceSources(nint attributes, out nint devices, out uint count);
-
-    internal static unsafe string[] Names()
-    {
-        Guid type = new("c60ac5fe-252a-478f-a0ef-bc8fa5f7cad3"),
-            video = new("8ac3587a-4ae7-42d8-99e0-0a6013eef90f"),
-            friendly = new("60d0e559-52f8-4fa2-bbce-acdb34a8ec01");
-        Marshal.ThrowExceptionForHR(MFStartup(0x20070, 0));
-        nint attributes = 0,
-            array = 0;
-        uint count = 0;
-        try
-        {
-            Marshal.ThrowExceptionForHR(MFCreateAttributes(out attributes, 1));
-            var setter = (delegate* unmanaged[Stdcall]<nint, Guid*, Guid*, int>)
-                (*(nint**)attributes)[24];
-            Marshal.ThrowExceptionForHR(setter(attributes, &type, &video));
-            Marshal.ThrowExceptionForHR(MFEnumDeviceSources(attributes, out array, out count));
-            var names = new string[count];
-            for (int i = 0; i < count; i++)
-            {
-                nint device = Marshal.ReadIntPtr(array, i * nint.Size),
-                    text = 0;
-                uint length = 0;
-                var get = (delegate* unmanaged[Stdcall]<nint, Guid*, nint*, uint*, int>)
-                    (*(nint**)device)[13];
-                try
-                {
-                    names[i] =
-                        get(device, &friendly, &text, &length) >= 0
-                            ? Marshal.PtrToStringUni(text, (int)length) ?? $"Camera {i}"
-                            : $"Camera {i}";
-                }
-                finally
-                {
-                    Marshal.FreeCoTaskMem(text);
-                }
-            }
-            return names;
-        }
-        finally
-        {
-            if (array != 0)
-            {
-                for (int i = 0; i < count; i++)
-                    Marshal.Release(Marshal.ReadIntPtr(array, i * nint.Size));
-                Marshal.FreeCoTaskMem(array);
-            }
-            if (attributes != 0)
-                Marshal.Release(attributes);
-            MFShutdown();
-        }
-    }
-}
-
 internal sealed class MotionInput : IDisposable
 {
     readonly int adapter;
@@ -175,15 +108,7 @@ internal sealed class MotionInput : IDisposable
             using var cap = new VideoCapture();
             bool camera = source.Kind == SourceKind.Camera;
             if (camera)
-            {
-                if (!cap.Open(source.CameraIndex, VideoCaptureAPIs.MSMF))
-                    throw new IOException(
-                        "无法打开选中的摄像头。请检查设备占用及 Windows 摄像头权限。"
-                    );
-                cap.Set(VideoCaptureProperties.FrameWidth, 2560);
-                cap.Set(VideoCaptureProperties.FrameHeight, 1440);
-                cap.Set(VideoCaptureProperties.Fps, 30);
-            }
+                CameraDevices.Open(cap, source.CameraIndex);
             else if (!cap.Open(source.Path, VideoCaptureAPIs.FFMPEG))
                 throw new IOException("视频解码失败");
             double fps = cap.Fps is > 1 and < 240 ? cap.Fps : 30;

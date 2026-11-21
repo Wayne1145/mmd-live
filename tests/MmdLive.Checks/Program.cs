@@ -17,6 +17,9 @@ internal static class Check
     {
         switch (args[0])
         {
+            case "contracts":
+                Contracts(args[1]);
+                break;
             case "video":
                 using (var input = new VideoCapture(args[1], VideoCaptureAPIs.FFMPEG))
                 using (
@@ -82,6 +85,56 @@ internal static class Check
             default:
                 throw new ArgumentException("video, alpha, blank or light");
         }
+    }
+
+    static void Contracts(string source)
+    {
+        var character = new AvatarRig(source);
+        Require(
+            character.Model.Bones.Count == 50 && character.Model.Vertices.Length > 10000,
+            "Studio Pilot import"
+        );
+        Require(
+            character.Skin.All(x => Math.Abs(x.M11 - 1) < .00001f && Math.Abs(x.M41) < .0001f),
+            "neutral skinning"
+        );
+        var requested = new CameraMode(2560, 1440, 30);
+        Require(
+            CameraMode.Prefer([new(1920, 1080, 60), new(2560, 1440, 15), requested]) == requested,
+            "1440p native mode selection"
+        );
+        Require(
+            CameraMode.Prefer([new(1280, 720, 30), new(1920, 1080, 30)])?.Width == 1920,
+            "camera mode fallback"
+        );
+        var expression = new float[52];
+        expression[9] = 1;
+        expression[25] = .8f;
+        var face = new System.Numerics.Vector3[478];
+        face[263] = new(120, 60, 0);
+        face[33] = new(80, 60, 0);
+        face[152] = new(100, 100, 0);
+        face[10] = new(100, 40, 0);
+        var motion = Tracking.Motion.Empty with
+        {
+            Face = face,
+            Expressions = expression,
+            Width = 200,
+            Height = 160,
+        };
+        character.Apply(motion, false, 1);
+        float Weight(string name) =>
+            character.EffectiveWeights[character.Model.Morphs.FindIndex(m => m.Name == name)];
+        Require(
+            Weight("ウィンク") > .9f && Weight("ウィンク右") == 0 && Weight("あ") > .7f,
+            "anatomical left blink and jaw mapping"
+        );
+        character.Calibrate(motion);
+        character.Apply(motion, false, 1);
+        Require(Weight("ウィンク") == 0 && Weight("あ") == 0, "neutral calibration");
+        Console.WriteLine(
+            "PMX import, neutral skin, independent blink, mouth, calibration and camera-mode contracts passed."
+        );
     }
 
     static void Alpha(string dir)
