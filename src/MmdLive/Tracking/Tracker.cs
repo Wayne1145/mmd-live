@@ -215,7 +215,7 @@ internal sealed class Tracker : IDisposable
                 )
                     palms.Add(found);
             }
-        var foundHands = new List<(bool left, float score, Vector3[] marks)>();
+        var candidates = new List<HandCandidate>(palms.Count);
         foreach (var d in palms.Take(2))
         {
             var region = Bounds(d.Marks, Crop.Upright(d.Marks[0], d.Marks[2]), 3, -.4f);
@@ -225,30 +225,48 @@ internal sealed class Tracker : IDisposable
             if (raw[1][0] < .55f)
                 continue;
             var pts = Project(raw[0], region, hand.Size, 3, 21);
-            bool left = raw[2][0] > .5f; // The classifier expects a mirrored selfie; source frames are unmirrored.
-            if (body.Length > 0 && visible[15] > .45f && visible[16] > .45f)
-                left =
-                    Vector2.DistanceSquared(XY(pts[0]), XY(body[15]))
-                    < Vector2.DistanceSquared(XY(pts[0]), XY(body[16]));
-            foundHands.Add((left, raw[1][0], pts));
+            candidates.Add(new HandCandidate(raw[2][0], raw[1][0], pts));
         }
-        if (foundHands.Count == 2 && foundHands[0].left == foundHands[1].left)
+        return AssignHands(candidates, body, visible);
+    }
+
+    internal sealed record HandCandidate(float RightProbability, float Presence, Vector3[] Points);
+
+    internal static Hand[] AssignHands(
+        IReadOnlyList<HandCandidate> candidates,
+        Vector3[] body,
+        float[] visibility
+    )
+    {
+        var bySide = new Dictionary<bool, (Hand hand, float strength)>();
+        foreach (var candidate in candidates)
         {
-            var sorted = foundHands
-                .OrderByDescending(x =>
-                    body.Length > 0
-                        ? Vector2.DistanceSquared(XY(x.marks[0]), XY(body[16]))
-                            - Vector2.DistanceSquared(XY(x.marks[0]), XY(body[15]))
-                        : x.marks[0].X
-                )
-                .ToArray();
-            return
-            [
-                new(true, sorted[0].score, sorted[0].marks),
-                new(false, sorted[1].score, sorted[1].marks),
-            ];
+            // OpenCV Zoo handpose Identity_2 is P(right). A crop preserves the source orientation.
+            bool left = candidate.RightProbability < .5f;
+            float confidence = Math.Max(candidate.RightProbability, 1 - candidate.RightProbability);
+            var wrist = XY(candidate.Points[0]);
+            float reach = Math.Max(16, candidate.Points.Max(p => Vector2.Distance(wrist, XY(p))));
+            float LeftOrRightDistance(int index) =>
+                index < body.Length && index < visibility.Length && visibility[index] > .45f
+                    ? Vector2.Distance(wrist, XY(body[index]))
+                    : float.PositiveInfinity;
+            float leftDistance = LeftOrRightDistance(15);
+            float rightDistance = LeftOrRightDistance(16);
+            float nearest = Math.Min(leftDistance, rightDistance);
+            if (
+                nearest < Math.Max(12, reach * .35f)
+                && Math.Abs(leftDistance - rightDistance) > reach * .2f
+            )
+            {
+                left = leftDistance < rightDistance;
+                confidence = Math.Max(confidence, 1 - nearest / reach);
+            }
+            // A single avatar has one wrist per side. Duplicate crops compete for the same wrist.
+            float strength = candidate.Presence * confidence;
+            if (!bySide.TryGetValue(left, out var previous) || strength > previous.strength)
+                bySide[left] = (new Hand(left, candidate.Presence, candidate.Points), strength);
         }
-        return foundHands.Select(x => new Hand(x.left, x.score, x.marks)).ToArray();
+        return bySide.Values.Select(x => x.hand).ToArray();
     }
 
     static Vector3[] Project(float[] data, Crop c, int size, int stride, int count)

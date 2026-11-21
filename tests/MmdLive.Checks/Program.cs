@@ -129,11 +129,48 @@ internal static class Check
             Weight("ウィンク") > .9f && Weight("ウィンク右") == 0 && Weight("あ") > .7f,
             "anatomical left blink and jaw mapping"
         );
+        var points = Enumerable.Repeat(new System.Numerics.Vector3(50, 40, 0), 21).ToArray();
+        var right = new Tracking.Tracker.HandCandidate(.97f, .99f, points);
+        var left = right with { RightProbability = .02f };
+        Require(
+            !Tracking.Tracker.AssignHands([right], [], []).Single().Left,
+            "right hand outside body frame"
+        );
+        Require(
+            Tracking.Tracker.AssignHands([left], [], []).Single().Left,
+            "left hand outside body frame"
+        );
+        var duplicate = right with { Presence = .8f };
+        Require(
+            !Tracking.Tracker.AssignHands([right, duplicate], [], []).Single().Left,
+            "two observations of the same wrist"
+        );
+        Require(
+            Tracking
+                .Tracker.AssignHands([left, right], [], [])
+                .Select(h => h.Left)
+                .Distinct()
+                .Count() == 2,
+            "two independent hands"
+        );
+        var body = new System.Numerics.Vector3[33];
+        var visibility = new float[33];
+        body[15] = points[0];
+        visibility[15] = .9f;
+        Require(
+            Tracking.Tracker.AssignHands([right], body, visibility).Single().Left,
+            "visible left wrist corrects a contradictory classifier"
+        );
+        body[15] += new System.Numerics.Vector3(200, 0, 0);
+        Require(
+            !Tracking.Tracker.AssignHands([right], body, visibility).Single().Left,
+            "distant wrists preserve the hand classifier"
+        );
         character.Calibrate(motion);
         character.Apply(motion, false, 1);
         Require(Weight("ウィンク") == 0 && Weight("あ") == 0, "neutral calibration");
         Console.WriteLine(
-            "PMX import, neutral skin, independent blink, mouth, calibration and camera-mode contracts passed."
+            "PMX import, neutral skin, facial morphs, hand sides, calibration and camera modes passed."
         );
     }
 
