@@ -22,10 +22,20 @@ internal sealed class MotionInput : IDisposable
     readonly int adapter;
     CancellationTokenSource? stop;
     Task work = Task.CompletedTask;
-    public long LastStamp => Interlocked.Read(ref stamp);
-    long stamp;
-    public Motion Latest => Volatile.Read(ref latest);
-    Motion latest = Motion.Empty;
+    readonly PreviewMailbox frames = new();
+    public volatile bool PreviewVisible;
+    public Motion Latest => frames.Latest.Driven;
+
+    public InputSample Read(out Bitmap? preview)
+    {
+        var sample = frames.Read(out preview);
+        if (stop?.IsCancellationRequested != true)
+            return sample;
+        preview?.Dispose();
+        preview = null;
+        return InputSample.Empty;
+    }
+
     string status = "等待输入";
     public string Status => Volatile.Read(ref status);
 
@@ -37,7 +47,6 @@ internal sealed class MotionInput : IDisposable
         var cancellation = new CancellationTokenSource();
         stop = cancellation;
         status = "正在准备 GPU 追踪…";
-        latest = Motion.Empty;
         work = Task.Run(() => Run(source, cancellation.Token));
     }
 
@@ -54,8 +63,10 @@ internal sealed class MotionInput : IDisposable
                 using var image = Cv2.ImDecode(File.ReadAllBytes(source.Path), ImreadModes.Color);
                 if (image.Empty())
                     throw new InvalidDataException("图片解码失败");
-                Interlocked.Exchange(ref stamp, Stopwatch.GetTimestamp());
-                Volatile.Write(ref latest, tracker.Track(image));
+                long stamp = Stopwatch.GetTimestamp();
+                var detected = tracker.Track(image);
+                token.ThrowIfCancellationRequested();
+                frames.Publish(new(detected, detected, stamp), PreviewMailbox.Downsample(image));
                 status = $"图片   {image.Width} × {image.Height}";
                 return;
             }
@@ -79,9 +90,13 @@ internal sealed class MotionInput : IDisposable
                 {
                     using (frame.Image)
                     {
-                        var motion = hold.Update(tracker.Track(frame.Image));
-                        Interlocked.Exchange(ref stamp, frame.Stamp);
-                        Volatile.Write(ref latest, motion);
+                        var detected = tracker.Track(frame.Image);
+                        var driven = hold.Update(detected);
+                        token.ThrowIfCancellationRequested();
+                        frames.Publish(
+                            new(detected, driven, frame.Stamp),
+                            PreviewVisible ? PreviewMailbox.Downsample(frame.Image) : null
+                        );
                     }
                 }
             }
@@ -97,7 +112,7 @@ internal sealed class MotionInput : IDisposable
         catch (Exception ex)
         {
             status = ex.GetBaseException().Message;
-            Volatile.Write(ref latest, Motion.Empty);
+            frames.Publish(InputSample.Empty, null);
         }
     }
 
@@ -157,12 +172,13 @@ internal sealed class MotionInput : IDisposable
             stop.Dispose();
             stop = null;
         }
-        Volatile.Write(ref latest, Motion.Empty);
+        frames.Publish(InputSample.Empty, null);
         status = "等待输入";
     }
 
     public void Dispose()
     {
         stop?.Cancel();
+        frames.Dispose();
     }
 }

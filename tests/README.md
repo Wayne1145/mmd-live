@@ -13,6 +13,14 @@
 
 用于端到端回放时，运行发布版 `MmdLive.exe --studio --video <路径> --metrics <结果目录> --seconds 1800`。结果文件 `playback.json` 每十秒更新，包含真实输入分辨率、画面提交帧率、姿态更新频率和 P95 延迟。延迟从解码帧可用开始计时，到该帧姿态的画面提交结束。单帧静态模式额外导出 RGB 关键点叠图和带透明通道的角色图。
 
+## 本地追踪预览
+
+在带图形桌面的 Windows 工作站上运行以下命令。使用一张脸和手可见的照片，测试控制台显示当前输入，勾选后出现两组骨骼，取消勾选后恢复相同的原图像素，停止后清除画面。
+
+```powershell
+./scripts/dotnet.ps1 run --no-build -c Release --project tests/MmdLive.Checks -- preview ./assets/studio/StudioPilot.pmx ./local/woman_hands.jpg ./artifacts/preview
+```
+
 ## OBS 游戏捕获验收
 
 用独立的 OBS 便携配置准备一个名为 `MmdQA` 的场景，在其 WebSocket 服务中设置测试口令。在同一 Windows 会话中运行本软件并打开一张静态照片。以下脚本连接本机端口，通过 OBS 的窗口列表选取 `MMD Live — OBS Output`，生成黑底、白底和单独游戏源的截图。测试设置及 OBS 统计写入 `obs.json`。

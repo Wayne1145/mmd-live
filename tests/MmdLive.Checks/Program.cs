@@ -14,12 +14,16 @@ internal static class Check
             throw new InvalidDataException(message);
     }
 
+    [STAThread]
     static void Main(string[] args)
     {
         switch (args[0])
         {
             case "contracts":
                 Contracts(args[1]);
+                break;
+            case "preview":
+                PreviewChecks.Studio(args[1], args[2], args[3]);
                 break;
             case "upright":
                 UprightPlayback(args[1], args[2]);
@@ -171,6 +175,7 @@ internal static class Check
             "distant wrists preserve the hand classifier"
         );
         CheckHeadAndSpine(character, motion);
+        PreviewChecks.Contracts(character, motion);
         character.Calibrate(motion);
         character.Apply(motion, false, 1);
         Require(Weight("ウィンク") == 0 && Weight("あ") == 0, "neutral calibration");
