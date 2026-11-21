@@ -483,6 +483,7 @@ internal sealed class StudioForm : Form
         tabs.SelectedTab = previewPage;
         preview.ClearFrame();
         UpdatePreviewVisibility();
+        renderer?.Rig?.ResetLiveTracking();
         await input.Start(source);
     }
 
@@ -665,11 +666,9 @@ internal sealed class StudioForm : Form
             && showBones.Checked
             && sample.Stamp != 0
             && ReferenceEquals(preview.Sample, sample);
+        var driven = renderer.Rig?.ApplySample(sample, renderer.FullBody, Stopwatch.GetTimestamp());
         var trace =
-            compare && (bitmap != null || previewDirty || now - lastPreview >= 200)
-                ? new RigTrace()
-                : null;
-        renderer.Rig?.Apply(m, renderer.FullBody, .32f, trace);
+            compare && (bitmap != null || previewDirty || now - lastPreview >= 200) ? driven : null;
         renderer.Render(
             preview: trace == null ? null : preview.AvatarBuffer(renderer.ThumbnailSize)
         );

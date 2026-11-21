@@ -86,6 +86,7 @@ internal static class RetargetChecks
             Apply(Motion.Empty, .32f).Bones.Length == 0,
             "empty frame must clear active bones during relaxation"
         );
+        LiveContinuity(rig, sample);
         long now = Stopwatch.GetTimestamp(),
             old = now - Stopwatch.Frequency;
         Check(
@@ -93,6 +94,62 @@ internal static class RetargetChecks
                 && !new InputSample(sample, old, true).Expired(now),
             "stalled live input expires while a still photograph remains valid"
         );
+    }
+
+    static void LiveContinuity(AvatarRig rig, Motion motion)
+    {
+        rig.ResetLiveTracking();
+        int wrist = rig.Model.Bones.FindIndex(b => b.Name == "左手首");
+        Quaternion Rotation() =>
+            Quaternion.Normalize(Quaternion.CreateFromRotationMatrix(rig.Skin[wrist]));
+        static float Angle(Quaternion a, Quaternion b) =>
+            MathF.Acos(Math.Clamp(Math.Abs(Quaternion.Dot(a, b)), 0, 1)) * 360 / MathF.PI;
+        long tick = Stopwatch.Frequency / 30,
+            stamp = tick;
+        InputSample Frame(Motion m) => new(m, stamp += tick);
+        var palm = (Vector3[])motion.Hands[0].Points.Clone();
+        palm[0] = new(345, 240, 0);
+        palm[9] = new(345, 204, -4);
+        palm[5] = new(325, 205, -5);
+        palm[17] = new(365, 205, -5);
+        Motion WithPalm(Vector3[] p) => motion with { Hands = [new(true, 1, p)] };
+        var open = Frame(WithPalm(palm));
+        rig.ApplySample(open, false, stamp);
+        var missing = Frame(motion with { Hands = [] });
+        var trace = rig.ApplySample(missing, false, stamp);
+        Check(!trace.Targets.ContainsKey(wrist), "first missing live sample still draws a palm");
+        var reverse = (Vector3[])palm.Clone();
+        (reverse[5], reverse[17]) = (reverse[17], reverse[5]);
+        var turned = WithPalm(reverse);
+        var reacquired = Frame(turned);
+        var before = Rotation();
+        rig.ApplySample(reacquired, false, stamp);
+        var after = Rotation();
+        float step = Angle(before, after);
+        Check(
+            step > 1 && step <= 22.05f,
+            "reacquisition must turn towards an observed wrist within the 30 Hz allowance"
+        );
+        var skin = rig.Skin.ToArray();
+        for (int i = 1; i <= 7; i++)
+            rig.ApplySample(reacquired, false, stamp + tick * i / 8);
+        Check(skin.SequenceEqual(rig.Skin), "rendering a camera sample twice advances its pose");
+        for (int i = 0; i < 18; i++)
+            rig.ApplySample(Frame(turned), false, stamp);
+        Check(
+            Angle(before, Rotation()) > 100,
+            "limiting the first turn froze a sustained real palm rotation"
+        );
+        Check(
+            rig.ApplySample(InputSample.Empty, false, stamp + tick).Targets.Count == 0,
+            "stale input kept live debug bones"
+        );
+        stamp += Stopwatch.Frequency * 3;
+        rig.ApplySample(InputSample.Empty, false, stamp);
+        var rest = Rotation();
+        rig.ApplySample(Frame(turned), false, stamp);
+        Check(Angle(rest, Rotation()) <= 33.05f, "a long gap banked unbounded rotation on return");
+        rig.ResetLiveTracking();
     }
 
     // Encode the phase in a corner of a file source. Read it back from the exact bitmap delivered to the UI.
@@ -163,8 +220,7 @@ internal static class RetargetChecks
                 if ((uint)phase >= masks.Length)
                     continue;
                 var m = sample.Detected;
-                var trace = new RigTrace();
-                rig.Apply(m, false, .32f, trace);
+                var trace = rig.ApplySample(sample, false, Stopwatch.GetTimestamp());
                 var snapshot = rig.Snapshot(trace, m);
                 bool left = m.Hands.Any(h => h.Left),
                     right = m.Hands.Any(h => !h.Left);

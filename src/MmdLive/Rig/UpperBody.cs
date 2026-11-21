@@ -9,7 +9,7 @@ internal sealed partial class AvatarRig
 
     ArmChain[] arms = [];
     bool[] upperLimb = [];
-    readonly Vector2?[] recentElbowDepth = new Vector2?[2];
+    readonly (Vector3 Upper, Vector3 Lower)?[] lastArm = new (Vector3, Vector3)?[2];
     int[] shoulderParents = [],
         remainingBones = [];
 
@@ -147,7 +147,7 @@ internal sealed partial class AvatarRig
             float difference = z.X + z.Y - wristPrior;
             float cost = Vector2.DistanceSquared(z, prior) + difference * difference;
             if (previous is { } last)
-                cost += .25f * Vector2.DistanceSquared(z, last);
+                cost += .92f * Vector2.DistanceSquared(z, last);
             if (cost < bestCost)
             {
                 bestCost = cost;
@@ -161,12 +161,13 @@ internal sealed partial class AvatarRig
         Motion m,
         Vector3[] translation,
         Dictionary<int, (Vector3 rest, Vector3 target)> aims,
-        RigTrace? trace
+        RigTrace? trace,
+        float stepSeconds
     )
     {
         if (!m.Sees(11) || !m.Sees(12) || arms.Any(a => a.Shoulder < 0))
         {
-            Array.Clear(recentElbowDepth);
+            Array.Clear(lastArm);
             return;
         }
         var left = OriginOf(arms[0].Shoulder, translation);
@@ -188,8 +189,8 @@ internal sealed partial class AvatarRig
         var modelCenter = (left + right) / 2;
         for (int side = 0; side < 2; side++)
         {
-            var lastDepth = recentElbowDepth[side];
-            recentElbowDepth[side] = null;
+            var previous = lastArm[side];
+            lastArm[side] = null;
             var arm = arms[side];
             if (
                 arm.Elbow < 0
@@ -238,6 +239,7 @@ internal sealed partial class AvatarRig
                         * Vector3.Distance(left, right)
                         / worldSpan
                     : -.22f * maxReach;
+            Vector3? elbowHint = null;
             if (reliableElbow)
             {
                 var e = ElbowInLens(elbowXY, targetXY, upper, lower);
@@ -250,13 +252,24 @@ internal sealed partial class AvatarRig
                             * Vector3.Distance(left, right)
                             / worldSpan
                         : .12f * upper;
+                Vector2? lastDepth = previous is { } armPose
+                    ? new(armPose.Upper.Z, armPose.Lower.Z)
+                    : null;
                 var z = LiftDepth(uz, lz, new(upperPrior, depth - upperPrior), depth, lastDepth);
-                recentElbowDepth[side] = z;
-                aims[arm.Shoulder] = (upperRest, new(e, z.X));
-                aims[arm.Elbow] = (lowerRest, new(lowerXY, z.Y));
-                trace?.Mark(arm.Shoulder, arm.Elbow);
-                trace?.Mark(arm.Elbow, arm.Wrist);
-                continue;
+                // A front/back branch can change on a tiny measurement. Move wrist depth
+                // continuously, then solve the elbow on the two-link circle at that depth.
+                depth = z.X + z.Y;
+                elbowHint = new(e, z.X);
+                if (stepSeconds > 0 && previous is { } last)
+                {
+                    float travel = maxReach * 2.6f * stepSeconds;
+                    float lastZ = last.Upper.Z + last.Lower.Z;
+                    depth = lastZ + Math.Clamp(depth - lastZ, -travel, travel);
+                    elbowHint = new(
+                        e,
+                        last.Upper.Z + Math.Clamp(z.X - last.Upper.Z, -travel, travel)
+                    );
+                }
             }
             var target = new Vector3(targetXY, Math.Clamp(depth, -zLimit, zLimit));
             float distance = target.Length();
@@ -268,7 +281,7 @@ internal sealed partial class AvatarRig
             float along = (upper * upper - lower * lower + distance * distance) / (2 * distance);
             // A missing elbow can still articulate the mesh toward an observed wrist. Only measured parts are drawn.
             var outside = new Vector3(side == 0 ? -1 : 1, -.45f, .32f);
-            var pole = outside;
+            var pole = elbowHint ?? previous?.Upper ?? outside;
             pole -= axis * Vector3.Dot(axis, pole);
             if (pole.LengthSquared() < .0001f)
             {
@@ -278,13 +291,40 @@ internal sealed partial class AvatarRig
             {
                 pole = Vector3.Cross(axis, Math.Abs(axis.Y) < .8f ? Vector3.UnitY : Vector3.UnitX);
             }
+            // Near full extension the bend plane is ill-conditioned. An observed elbow may
+            // pass through this singularity. Slew its pole around the wrist axis on return.
+            if (stepSeconds > 0 && previous is { } prior)
+            {
+                var before = prior.Upper - axis * Vector3.Dot(axis, prior.Upper);
+                if (before.LengthSquared() > .0001f)
+                {
+                    float angle = MathF.Atan2(
+                        Vector3.Dot(axis, Vector3.Cross(before, pole)),
+                        Vector3.Dot(before, pole)
+                    );
+                    float limit = 12f * stepSeconds;
+                    pole = Vector3.Transform(
+                        before,
+                        Quaternion.CreateFromAxisAngle(axis, Math.Clamp(angle, -limit, limit))
+                    );
+                }
+            }
             var elbowDirection =
                 axis * along
                 + Vector3.Normalize(pole) * MathF.Sqrt(Math.Max(0, upper * upper - along * along));
+            lastArm[side] = (elbowDirection, target - elbowDirection);
             aims[arm.Shoulder] = (upperRest, elbowDirection);
             aims[arm.Elbow] = (lowerRest, target - elbowDirection);
-            trace?.Targets.Remove(arm.Shoulder);
-            trace?.Targets.Remove(arm.Elbow);
+            if (reliableElbow)
+            {
+                trace?.Mark(arm.Shoulder, arm.Elbow);
+                trace?.Mark(arm.Elbow, arm.Wrist);
+            }
+            else
+            {
+                trace?.Targets.Remove(arm.Shoulder);
+                trace?.Targets.Remove(arm.Elbow);
+            }
         }
     }
 

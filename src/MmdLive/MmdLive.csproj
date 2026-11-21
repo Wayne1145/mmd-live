@@ -9,7 +9,7 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <PlatformTarget>x64</PlatformTarget>
     <AssemblyName>MmdLive</AssemblyName>
-    <Version>0.1.4</Version>
+    <Version>0.1.5</Version>
     <Product>MMD Live</Product>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>

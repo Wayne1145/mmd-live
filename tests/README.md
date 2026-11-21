@@ -32,6 +32,18 @@
 
 图片诊断的 `overlay.png` 使用与控制台相同的可见关节点和肩宽对齐。青线为当前帧识别结果，橙线为解算后模型的实际骨骼。按肩宽对齐时，伸向镜头的手会受透视和角色骨长影响。
 
+## 连续追踪回放
+
+`observe` 将本地视频逐帧送入 DirectML，向既有目录写入每帧的原始观测。对照片可加重复次数检查静止漂移。`replay` 将同一组观测送入半身直播解算器，记录头及左右上臂、前臂和手腕相邻帧的局部与世界转角，以及按肩宽投影的腕点位置。附上对应视频时使用视频帧率并可指定叠图帧号，单独读观测时按 30 Hz 回放。
+
+```powershell
+./scripts/dotnet.ps1 run --no-build -c Release --project tests/MmdLive.Checks -- observe ./local/thanks-1440.avi ./artifacts/video.ndjson
+./scripts/dotnet.ps1 run --no-build -c Release --project tests/MmdLive.Checks -- observe ./local/woman_hands.jpg ./artifacts/still.ndjson 48
+./scripts/dotnet.ps1 run --no-build -c Release --project tests/MmdLive.Checks -- replay ./assets/studio/StudioPilot.pmx ./artifacts/video.ndjson ./artifacts/replay ./local/thanks-1440.avi 6,12,27,34,39
+```
+
+`metrics.ndjson` 的角度单位为度，`wristErrorPct` 的单位为输入画面宽度的百分比，无手部观测的帧记为 `null`。比较前后版本时，同时检查可见率、最长连续缺失、快速抬手的到达帧以及腕点误差。
+
 ## OBS 游戏捕获验收
 
 用独立的 OBS 便携配置准备一个名为 `MmdQA` 的场景，在其 WebSocket 服务中设置测试口令。在同一 Windows 会话中运行本软件并打开一张静态照片。以下脚本连接本机端口，通过 OBS 的窗口列表选取 `MMD Live — OBS Output`，生成黑底、白底和单独游戏源的截图。测试设置及 OBS 统计写入 `obs.json`。
