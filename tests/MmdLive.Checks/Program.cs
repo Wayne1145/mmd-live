@@ -19,6 +19,18 @@ internal static class Check
     {
         switch (args[0])
         {
+            case "replay":
+                StabilityReplay.Run(
+                    args[1],
+                    args[2],
+                    args[3],
+                    args.ElementAtOrDefault(4),
+                    args.ElementAtOrDefault(5)
+                );
+                break;
+            case "observe":
+                StabilityReplay.Observe(args[1], args[2], args.Length > 3 ? int.Parse(args[3]) : 0);
+                break;
             case "contracts":
                 Contracts(args[1]);
                 break;
@@ -94,7 +106,9 @@ internal static class Check
                 }
                 break;
             default:
-                throw new ArgumentException("contracts, upright, video, alpha, blank or light");
+                throw new ArgumentException(
+                    "contracts, upright, video, alpha, blank, light, occlusion, preview, observe or replay"
+                );
         }
     }
 

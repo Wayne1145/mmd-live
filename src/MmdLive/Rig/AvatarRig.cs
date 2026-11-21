@@ -24,7 +24,7 @@ internal sealed partial class AvatarRig
     static readonly string[] LeftBlink = ["ウィンク", "ウィンク左", "まばたき左", "blinkleft"];
     static readonly string[] RightBlink = ["ウィンク右", "まばたき右", "winkright", "blinkright"];
 
-    public void ResetPoseOrigin() => grounding.Reset();
+    public void ResetPoseOrigin() => ResetLiveTracking();
 
     public AvatarRig(string path)
     {
@@ -143,11 +143,18 @@ internal sealed partial class AvatarRig
                 morphs[Key(canonical)] = i;
         }
         PrepareArms();
+        ResetLiveTracking();
     }
 
     public void Calibrate(Motion m) => neutral = (float[])m.Expressions.Clone();
 
-    public void Apply(Motion m, bool full, float smoothing, RigTrace? trace = null)
+    public void Apply(
+        Motion m,
+        bool full,
+        float smoothing,
+        RigTrace? trace = null,
+        float stepSeconds = 0
+    )
     {
         var targets = Enumerable.Repeat(Quaternion.Identity, rotations.Length).ToArray();
         var orientations = new Dictionary<int, Quaternion>();
@@ -414,10 +421,17 @@ internal sealed partial class AvatarRig
             if (orientations.TryGetValue(i, out var worldOrientation))
                 target = Quaternion.Inverse(parentQ) * worldOrientation * target;
             if (absolute.TryGetValue(i, out var aim))
-                target = FromTo(
-                    aim.rest,
-                    Vector3.Transform(aim.target, Quaternion.Inverse(parentQ))
-                );
+                target =
+                    stepSeconds > 0 && upperLimb[i]
+                        // One measured ray specifies a swing, not axial twist. Transport the previous
+                        // orientation so a forearm pointing back along its rest axis cannot spin.
+                        ? Quaternion.Inverse(parentQ)
+                            * FromTo(Vector3.Transform(aim.rest, global[i]), aim.target)
+                            * global[i]
+                        : FromTo(
+                            aim.rest,
+                            Vector3.Transform(aim.target, Quaternion.Inverse(parentQ))
+                        );
             if (
                 (b.Flags & PMX_BoneFlag.AcquireRotate) != 0
                 && (uint)b.AppendBoneIndex < (uint)rotations.Length
@@ -431,24 +445,38 @@ internal sealed partial class AvatarRig
                             Math.Clamp(b.AppendBoneRatio, -1, 1)
                         )
                 );
-            float amount =
-                (upperLimb[i] && absolute.ContainsKey(i)) || orientations.ContainsKey(i)
-                    ? Response(rotations[i], target, smoothing)
-                    : smoothing;
-            // Ease an unobserved limb back to its rest pose without reporting or replaying any observations.
+            bool measured =
+                (upperLimb[i] && absolute.ContainsKey(i)) || orientations.ContainsKey(i);
+            // Work in camera coordinates for a measured limb. Its parent's turn must not add a
+            // second rotation to the wrist's own turn allowance during reacquisition.
+            var from =
+                stepSeconds > 0 && measured
+                    ? Quaternion.Normalize(Quaternion.Inverse(parentQ) * global[i])
+                    : rotations[i];
+            float amount = measured ? Response(from, target, smoothing) : smoothing;
             if (
-                (upperLimb[i] || i == spine)
-                && !absolute.ContainsKey(i)
-                && !orientations.ContainsKey(i)
+                (upperLimb[i] || i == spine || (i == head && headInCamera == null))
+                && !measured
                 && Math.Abs(target.W) > .99999f
             )
-                amount = 1 - MathF.Pow(1 - smoothing, .22f);
-            rotations[i] = Quaternion.Slerp(rotations[i], target, amount);
+                amount = 1 - MathF.Pow(1 - smoothing, .12f);
+            if (stepSeconds > 0 && (measured || i == head))
+            {
+                float angle =
+                    2 * MathF.Acos(Math.Clamp(Math.Abs(Quaternion.Dot(from, target)), 0, 1));
+                float maxTurn =
+                    (orientations.ContainsKey(i) && upperLimb[i] ? 660 : 540)
+                    * (MathF.PI / 180)
+                    * stepSeconds;
+                if (angle > .0001f)
+                    amount = Math.Min(amount, maxTurn / angle);
+            }
+            rotations[i] = Quaternion.Normalize(Quaternion.Slerp(from, target, amount));
             Compose(i);
         }
         foreach (int i in shoulderParents)
             Solve(i);
-        PlaceArms(m, translation, absolute, trace);
+        PlaceArms(m, translation, absolute, trace, stepSeconds);
         foreach (int i in remainingBones)
             Solve(i);
         if (full && m.Body.Length == 33)

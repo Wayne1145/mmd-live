@@ -88,6 +88,7 @@ internal sealed class Tracker : IDisposable
         bodyRegion = null;
         frames = 0;
         lastHands = [];
+        Array.Clear(lastPoseWrists);
     }
 
     public Motion Track(Mat image)
@@ -96,7 +97,7 @@ internal sealed class Tracker : IDisposable
         var whole = Crop.Whole(image);
         bool refresh = frames++ % 8 == 0;
         var (body, visible, world) = GetBody(image, whole, refresh);
-        var (face, blend) = GetFace(image, whole, body, visible, refresh);
+        var (face, blend) = GetFace(image, whole, body, visible);
         if (body.Length == 0 && face.Length == 478)
         {
             var chin = XY(face[152]);
@@ -162,15 +163,9 @@ internal sealed class Tracker : IDisposable
         return (points, vis, world);
     }
 
-    IEnumerable<Crop> FaceCandidates(
-        Mat image,
-        Crop whole,
-        Vector3[] body,
-        float[] visible,
-        bool refresh
-    )
+    IEnumerable<Crop> FaceCandidates(Mat image, Crop whole, Vector3[] body, float[] visible)
     {
-        if (!refresh && faceRegion is Crop tracked)
+        if (faceRegion is Crop tracked)
             yield return tracked;
 
         Crop? Detect(Crop search, float threshold)
@@ -202,19 +197,11 @@ internal sealed class Tracker : IDisposable
         }
         if (Detect(whole, .55f) is Crop global)
             yield return global;
-        if (refresh && faceRegion is Crop previous)
-            yield return previous;
     }
 
-    (Vector3[], float[]) GetFace(
-        Mat image,
-        Crop whole,
-        Vector3[] body,
-        float[] visible,
-        bool refresh
-    )
+    (Vector3[], float[]) GetFace(Mat image, Crop whole, Vector3[] body, float[] visible)
     {
-        foreach (var c in FaceCandidates(image, whole, body, visible, refresh))
+        foreach (var c in FaceCandidates(image, whole, body, visible))
         {
             if (c.Side < 8)
                 continue;
@@ -242,31 +229,55 @@ internal sealed class Tracker : IDisposable
     }
 
     Hand[] lastHands = [];
+    readonly Vector2?[] lastPoseWrists = new Vector2?[2];
 
     Hand[] GetHands(Mat image, Crop whole, Vector3[] body, float[] visible)
     {
         var candidates = new List<HandCandidate>(2);
         var tried = new List<Detection>(4);
+        HandCandidate? Landmarks(Crop region, float minPresence, bool? trackedSide = null)
+        {
+            if (region.Side < 8)
+                return null;
+            var raw = hand.Image(image, region, false, "Identity", "Identity_1", "Identity_2");
+            if (raw[1][0] < minPresence)
+                return null;
+            var points = Project(raw[0], region, hand.Size, 3, 21);
+            bool InFrame(int i) => Motion.Inside(points[i], image.Width, image.Height);
+            if (!InFrame(0) || !(InFrame(5) || InFrame(9) || InFrame(13) || InFrame(17)))
+                return null;
+            float separation = Math.Max(6, Vector2.Distance(XY(points[0]), XY(points[9])) * .30f);
+            if (
+                candidates.Any(c =>
+                    Vector2.Distance(XY(c.Points[0]), XY(points[0])) < separation
+                    && Vector2.Distance(XY(c.Points[9]), XY(points[9])) < separation
+                )
+            )
+                return null;
+            return new(raw[2][0], raw[1][0], points, trackedSide);
+        }
+        Vector2? PoseWrist(int side) =>
+            body.Length == 33
+            && visible[15 + side] >= .55f
+            && Motion.Inside(body[15 + side], image.Width, image.Height)
+                ? XY(body[15 + side])
+                : null;
+
         void Measure(Detection d)
         {
             if (
                 tried.Any(other =>
                     Vector2.Distance(other.Center, d.Center) < Math.Max(6, d.Size.X * .28f)
                 )
+                || candidates.Any(c =>
+                    Vector2.Distance(XY(c.Points[0]), d.Marks[0]) < d.Size.X * .48f
+                )
             )
                 return;
             tried.Add(d);
             var region = Bounds(d.Marks, Crop.Upright(d.Marks[0], d.Marks[2]), 3, -.4f);
-            if (region.Side < 8)
-                return;
-            var raw = hand.Image(image, region, false, "Identity", "Identity_1", "Identity_2");
-            if (raw[1][0] < .6f)
-                return;
-            var points = Project(raw[0], region, hand.Size, 3, 21);
-            bool InFrame(int i) => Motion.Inside(points[i], image.Width, image.Height);
-            if (!InFrame(0) || !(InFrame(5) || InFrame(9) || InFrame(13) || InFrame(17)))
-                return;
-            candidates.Add(new(raw[2][0], raw[1][0], points));
+            if (Landmarks(region, .6f) is { } measured)
+                candidates.Add(measured);
         }
         foreach (var d in BlazeDetector.Find(palm, image, whole, false, .5f, 2))
             Measure(d);
@@ -297,7 +308,39 @@ internal sealed class Tracker : IDisposable
                 Search(XY(body[wrist]) + forearm * .16f, Math.Max(42, span * 2.2f));
             }
         }
-        // History selects a search window only. Both palm and hand networks must confirm this frame.
+        // The last palm locates a crop. All 21 points and presence come from the current image.
+        if (candidates.Count < 2)
+            foreach (var previous in lastHands)
+            {
+                int side = previous.Left ? 0 : 1;
+                var p = previous.Points;
+                var wrist = XY(p[0]);
+                if (
+                    candidates.Any(c =>
+                        Vector2.Distance(XY(c.Points[0]), wrist)
+                        < Vector2.Distance(wrist, XY(p[9])) * .6f
+                    )
+                )
+                    continue;
+                var axis = (XY(p[5]) + XY(p[9]) + XY(p[13])) / 3;
+                var region = Bounds(p.Select(XY), Crop.Upright(wrist, axis), 1.65f, -.04f);
+                var offset = Vector2.Zero;
+                if (
+                    PoseWrist(side) is { } current
+                    && lastPoseWrists[side] is { } last
+                    && Vector2.Distance(wrist, last) < region.Side * .45f
+                    && Vector2.Distance(current, last) < region.Side * .85f
+                )
+                    offset = current - last;
+                region = region with { Center = region.Center + offset };
+                if (
+                    Landmarks(region, .80f, previous.Left) is not { } measured
+                    || Vector2.Distance(XY(measured.Points[0]), wrist + offset) > region.Side * .36f
+                )
+                    continue;
+                candidates.Add(measured);
+            }
+        // If direct landmark tracking failed, try a local palm detector before giving up.
         if (candidates.Count < 2)
             foreach (var previous in lastHands)
             {
@@ -306,11 +349,43 @@ internal sealed class Tracker : IDisposable
                 float radius = previous.Points.Max(p => Vector2.Distance(center, XY(p)));
                 Search(center, Math.Max(42, radius * 3.5f));
             }
+        // A newly visible hand can lack a palm box. Pose index and pinky supply only the crop.
+        if (candidates.Count < 2)
+            for (int side = 0; side < 2; side++)
+            {
+                if (
+                    PoseWrist(side) is not { } wrist
+                    || visible[17 + side] < .55f
+                    || visible[19 + side] < .55f
+                )
+                    continue;
+                var tips = (XY(body[17 + side]) + XY(body[19 + side])) / 2;
+                var axis = tips - wrist;
+                float reach = axis.Length();
+                if (
+                    reach < 9
+                    || candidates.Any(c => Vector2.Distance(XY(c.Points[0]), wrist) < reach * .8f)
+                )
+                    continue;
+                var region = new Crop(wrist + axis * .58f, reach * 3.2f, Crop.Upright(wrist, tips));
+                if (
+                    Landmarks(region, .80f) is { } measured
+                    && Vector2.Distance(XY(measured.Points[0]), wrist) < reach * .8f
+                )
+                    candidates.Add(measured);
+            }
+        for (int side = 0; side < 2; side++)
+            lastPoseWrists[side] = PoseWrist(side);
         lastHands = AssignHands(candidates, body, visible);
         return lastHands;
     }
 
-    internal sealed record HandCandidate(float RightProbability, float Presence, Vector3[] Points);
+    internal sealed record HandCandidate(
+        float RightProbability,
+        float Presence,
+        Vector3[] Points,
+        bool? TrackedSide = null
+    );
 
     internal static Hand[] AssignHands(
         IReadOnlyList<HandCandidate> candidates,
@@ -322,8 +397,12 @@ internal sealed class Tracker : IDisposable
         foreach (var candidate in candidates)
         {
             // OpenCV Zoo handpose Identity_2 is P(right). A crop preserves the source orientation.
-            bool left = candidate.RightProbability < .5f;
-            float confidence = Math.Max(candidate.RightProbability, 1 - candidate.RightProbability);
+            bool left =
+                candidate.TrackedSide is { } tracked
+                && candidate.RightProbability is > .25f and < .75f
+                    ? tracked
+                    : candidate.RightProbability < .5f;
+            float confidence = left ? 1 - candidate.RightProbability : candidate.RightProbability;
             var wrist = XY(candidate.Points[0]);
             float reach = Math.Max(16, candidate.Points.Max(p => Vector2.Distance(wrist, XY(p))));
             float LeftOrRightDistance(int index) =>
