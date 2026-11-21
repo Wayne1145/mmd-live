@@ -5,7 +5,7 @@ using MmdLive.Tracking;
 
 namespace MmdLive.Rig;
 
-internal sealed class AvatarRig
+internal sealed partial class AvatarRig
 {
     public PMXFormat Model { get; }
     public Matrix4x4[] Skin { get; }
@@ -145,7 +145,7 @@ internal sealed class AvatarRig
 
     public void Calibrate(Motion m) => neutral = (float[])m.Expressions.Clone();
 
-    public void Apply(Motion m, bool full, float smoothing)
+    public void Apply(Motion m, bool full, float smoothing, RigTrace? trace = null)
     {
         var targets = Enumerable.Repeat(Quaternion.Identity, rotations.Length).ToArray();
         var absolute = new Dictionary<int, (Vector3 rest, Vector3 target)>();
@@ -155,12 +155,18 @@ internal sealed class AvatarRig
                 return;
             var rest = Model.Bones[end].Position - Model.Bones[bone].Position;
             if (rest.LengthSquared() > .0001f)
+            {
                 absolute[bone] = (rest, ToModel(direction));
+                trace?.Mark(bone, end);
+            }
         }
         void Rotate(int bone, Quaternion value)
         {
             if (bone >= 0)
+            {
                 targets[bone] = value;
+                trace?.Mark(bone);
+            }
         }
         if (m.Body.Length >= 33)
         {
@@ -230,6 +236,7 @@ internal sealed class AvatarRig
             var pitch = -MathF.Atan2(vertical.Z, Math.Max(1, Math.Abs(vertical.Y)));
             var roll = MathF.Atan2(eyes.Y, eyes.X);
             headInCamera = Quaternion.CreateFromYawPitchRoll(yaw, pitch, roll);
+            trace?.Mark(head);
             float blinkL = E(9),
                 blinkR = E(10);
             if (Lookup(morphs, LeftBlink) >= 0 && Lookup(morphs, RightBlink) >= 0)
@@ -293,10 +300,11 @@ internal sealed class AvatarRig
                 {
                     int prev = Digit(finger, Math.Max(0, part - 1));
                     if (prev >= 0 && prev != joint)
-                        absolute[joint] = (
-                            Model.Bones[joint].Position - Model.Bones[prev].Position,
-                            ToModel(direction)
-                        );
+                    {
+                        var tail = Model.Bones[joint].Position - Model.Bones[prev].Position;
+                        absolute[joint] = (tail, ToModel(direction));
+                        trace?.Mark(joint, offset: tail);
+                    }
                 }
             }
         }
@@ -314,6 +322,7 @@ internal sealed class AvatarRig
                 foreach (var x in offsets)
                     if ((uint)x.BoneIndex < (uint)targets.Length)
                     {
+                        trace?.Mark(x.BoneIndex);
                         translation[x.BoneIndex] += x.Translation * effective[i];
                         targets[x.BoneIndex] *= Quaternion.Slerp(
                             Quaternion.Identity,
@@ -333,7 +342,11 @@ internal sealed class AvatarRig
                     : height * .22f;
             var delta = grounding.Observe(m, shoulders, height);
             if (center >= 0)
+            {
                 translation[center] += delta;
+                if (m.Visibility[23] >= .45f && m.Visibility[24] >= .45f)
+                    trace?.Mark(center);
+            }
         }
         else
             grounding.Reset();
@@ -434,6 +447,7 @@ internal sealed class AvatarRig
                 {
                     int parent = Model.Bones[joint].ParentIndex;
                     var pq = parent >= 0 ? global[parent] : Quaternion.Identity;
+                    trace?.Mark(joint, end);
                     rotations[joint] = FromTo(
                         Model.Bones[end].Position - Model.Bones[joint].Position,
                         Vector3.Transform(direction, Quaternion.Inverse(pq))

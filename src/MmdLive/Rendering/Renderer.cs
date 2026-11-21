@@ -59,7 +59,7 @@ internal sealed record GraphicsAdapter(int Index, string Name, uint Vendor)
     }
 }
 
-internal sealed unsafe class Renderer : IDisposable
+internal sealed unsafe partial class Renderer : IDisposable
 {
     [StructLayout(LayoutKind.Sequential)]
     struct Vertex
@@ -396,7 +396,7 @@ internal sealed unsafe class Renderer : IDisposable
         return Part(device.CreateShaderResourceView(tex));
     }
 
-    public void Render(bool present = true)
+    public void Render(bool present = true, Bitmap? preview = null)
     {
         context.OMSetRenderTargets(targetView, depthView);
         context.ClearRenderTargetView(targetView, new Color4(0, 0, 0, 0));
@@ -413,6 +413,7 @@ internal sealed unsafe class Renderer : IDisposable
             var vp =
                 Matrix4x4.CreateLookAt(center - new Vector3(0, 0, total * 3), center, Vector3.UnitY)
                 * Matrix4x4.CreateOrthographic(h * width / height, h, .001f, total * 10);
+            ViewProjection = vp;
             var frame = new Scene(
                 vp,
                 Lights.Key.Direction,
@@ -446,6 +447,8 @@ internal sealed unsafe class Renderer : IDisposable
                 if (d.Transparent)
                     DrawMaterial(d, true);
         }
+        if (preview != null)
+            ReadThumbnail(preview);
         if (present && chain != null)
             chain.Present(1, PresentFlags.None).CheckError();
     }
