@@ -74,8 +74,7 @@ internal sealed partial class AvatarRig
                 return null;
             return new((x + y) / 2, (start + end) / 2, pixels / span, label);
         }
-        bool Visible(int a, int b) =>
-            m.Body.Length == 33 && m.Visibility[a] > .5f && m.Visibility[b] > .5f;
+        bool Visible(int a, int b) => m.Sees(a) && m.Sees(b);
         if (
             Visible(11, 12)
             && Pair(
@@ -114,6 +113,8 @@ internal sealed partial class AvatarRig
             return hips;
         foreach (var hand in m.Hands)
         {
+            if (!m.Sees(hand.Points[0]) || !m.Sees(hand.Points[9]))
+                continue;
             string side = hand.Left ? "左" : "右",
                 en = hand.Left ? "left" : "right";
             if (

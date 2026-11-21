@@ -24,12 +24,19 @@ internal sealed class MotionInput : IDisposable
     Task work = Task.CompletedTask;
     readonly PreviewMailbox frames = new();
     public volatile bool PreviewVisible;
-    public Motion Latest => frames.Latest.Driven;
+    public Motion Latest
+    {
+        get
+        {
+            var sample = frames.Latest;
+            return sample.Expired(Stopwatch.GetTimestamp()) ? Motion.Empty : sample.Detected;
+        }
+    }
 
     public InputSample Read(out Bitmap? preview)
     {
         var sample = frames.Read(out preview);
-        if (stop?.IsCancellationRequested != true)
+        if (stop?.IsCancellationRequested != true && !sample.Expired(Stopwatch.GetTimestamp()))
             return sample;
         preview?.Dispose();
         preview = null;
@@ -55,7 +62,6 @@ internal sealed class MotionInput : IDisposable
         try
         {
             using var tracker = new Tracking.Tracker(Program.Models, adapter);
-            var hold = new OcclusionHold();
             if (token.IsCancellationRequested)
                 return;
             if (source.Kind == SourceKind.Image)
@@ -66,7 +72,7 @@ internal sealed class MotionInput : IDisposable
                 long stamp = Stopwatch.GetTimestamp();
                 var detected = tracker.Track(image);
                 token.ThrowIfCancellationRequested();
-                frames.Publish(new(detected, detected, stamp), PreviewMailbox.Downsample(image));
+                frames.Publish(new(detected, stamp, Still: true), PreviewMailbox.Downsample(image));
                 status = $"图片   {image.Width} × {image.Height}";
                 return;
             }
@@ -91,10 +97,9 @@ internal sealed class MotionInput : IDisposable
                     using (frame.Image)
                     {
                         var detected = tracker.Track(frame.Image);
-                        var driven = hold.Update(detected);
                         token.ThrowIfCancellationRequested();
                         frames.Publish(
-                            new(detected, driven, frame.Stamp),
+                            new(detected, frame.Stamp),
                             PreviewVisible ? PreviewMailbox.Downsample(frame.Image) : null
                         );
                     }

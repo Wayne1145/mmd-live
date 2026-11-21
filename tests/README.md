@@ -22,6 +22,16 @@
 ./scripts/dotnet.ps1 run --no-build -c Release --project tests/MmdLive.Checks -- preview ./assets/studio/StudioPilot.pmx ./local/thanks-1440.avi ./artifacts/preview-video --video
 ```
 
+## 当前帧的遮挡与对齐
+
+使用有脸和双手的真人照片，下面的回归会生成一段本地遮挡录像，按实际输入链路检查遮住右手、左手、脸、整幅画面和重新入画时的驱动骨名。
+
+```powershell
+./scripts/dotnet.ps1 run --no-build -c Release --project tests/MmdLive.Checks -- occlusion ./assets/studio/StudioPilot.pmx ./local/woman_hands.jpg ./artifacts/occlusion
+```
+
+图片诊断的 `overlay.png` 使用与控制台相同的可见关节点和肩宽对齐。青线为当前帧识别结果，橙线为解算后模型的实际骨骼。按肩宽对齐时，伸向镜头的手会受透视和角色骨长影响。
+
 ## OBS 游戏捕获验收
 
 用独立的 OBS 便携配置准备一个名为 `MmdQA` 的场景，在其 WebSocket 服务中设置测试口令。在同一 Windows 会话中运行本软件并打开一张静态照片。以下脚本连接本机端口，通过 OBS 的窗口列表选取 `MMD Live — OBS Output`，生成黑底、白底和单独游戏源的截图。测试设置及 OBS 统计写入 `obs.json`。

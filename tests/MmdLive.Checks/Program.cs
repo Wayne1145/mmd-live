@@ -22,6 +22,9 @@ internal static class Check
             case "contracts":
                 Contracts(args[1]);
                 break;
+            case "occlusion":
+                RetargetChecks.Occlusion(args[1], args[2], args[3]).GetAwaiter().GetResult();
+                break;
             case "preview":
                 PreviewChecks.Studio(args[1], args[2], args[3], args.Contains("--video"));
                 break;
@@ -176,6 +179,7 @@ internal static class Check
         );
         CheckHeadAndSpine(character, motion);
         PreviewChecks.Contracts(character, motion);
+        RetargetChecks.Contracts(character);
         character.Calibrate(motion);
         character.Apply(motion, false, 1);
         Require(Weight("ウィンク") == 0 && Weight("あ") == 0, "neutral calibration");

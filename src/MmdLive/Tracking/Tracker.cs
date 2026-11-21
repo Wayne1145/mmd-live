@@ -20,6 +20,22 @@ internal sealed record Motion(
 {
     // Hip-centered coordinates in meters, rotated back into camera axes.
     public Vector3[] WorldBody { get; init; } = [];
+
+    internal bool Sees(int index) =>
+        index < Body.Length
+        && index < Visibility.Length
+        && Visibility[index] >= .55f
+        && Inside(Body[index], Width, Height);
+
+    internal bool Sees(Vector3 point) => Inside(point, Width, Height);
+
+    internal static bool Inside(Vector3 point, int width, int height) =>
+        point.X >= 0
+        && point.X < width
+        && point.Y >= 0
+        && point.Y < height
+        && float.IsFinite(point.Z);
+
     public static Motion Empty { get; } = new(1, 1, [], [], [], [], [], 0);
 }
 
@@ -71,6 +87,7 @@ internal sealed class Tracker : IDisposable
         faceRegion = null;
         bodyRegion = null;
         frames = 0;
+        lastHands = [];
     }
 
     public Motion Track(Mat image)
@@ -205,6 +222,11 @@ internal sealed class Tracker : IDisposable
             if (BlazeDetector.Sigmoid(raw[1][0]) < .55f)
                 continue;
             var points = Project(raw[0], c, mesh.Size, 3, 478);
+            if (
+                !Motion.Inside(points[1], image.Width, image.Height)
+                || points.Count(p => Motion.Inside(p, image.Width, image.Height)) < 239
+            )
+                continue;
             var input = new float[subset.Length * 2];
             for (int i = 0; i < subset.Length; i++)
             {
@@ -219,46 +241,73 @@ internal sealed class Tracker : IDisposable
         return ([], []);
     }
 
+    Hand[] lastHands = [];
+
     Hand[] GetHands(Mat image, Crop whole, Vector3[] body, float[] visible)
     {
-        var palms = BlazeDetector.Find(palm, image, whole, false, .5f, 2);
-        // A 1440p full-body frame can contain hands too small for the 192-pixel global detector.
-        if (body.Length > 0 && palms.Count < 2)
-            foreach (var (wrist, elbow) in new[] { (15, 13), (16, 14) })
-            {
-                if (visible[wrist] < .45f)
-                    continue;
-                var w = XY(body[wrist]);
-                float length = Vector2.Distance(w, XY(body[elbow]));
-                if (
-                    palms.Any(x =>
-                        Vector2.Distance(w, x.Center) < Math.Max(x.Size.X, length * .52f)
-                    )
-                )
-                    continue;
-                var area = new Crop(w + (w - XY(body[elbow])) * .18f, Math.Max(42, length * 2.2f));
-                var found = BlazeDetector.Find(palm, image, area, false, .53f, 1).FirstOrDefault();
-                if (
-                    found != null
-                    && palms.All(x =>
-                        Vector2.Distance(x.Center, found.Center) > Math.Max(10, found.Size.X * .65f)
-                    )
-                )
-                    palms.Add(found);
-            }
-        var candidates = new List<HandCandidate>(palms.Count);
-        foreach (var d in palms.Take(2))
+        var candidates = new List<HandCandidate>(2);
+        var tried = new List<Detection>(4);
+        void Measure(Detection d)
         {
+            if (
+                tried.Any(other =>
+                    Vector2.Distance(other.Center, d.Center) < Math.Max(6, d.Size.X * .28f)
+                )
+            )
+                return;
+            tried.Add(d);
             var region = Bounds(d.Marks, Crop.Upright(d.Marks[0], d.Marks[2]), 3, -.4f);
             if (region.Side < 8)
-                continue;
+                return;
             var raw = hand.Image(image, region, false, "Identity", "Identity_1", "Identity_2");
-            if (raw[1][0] < .55f)
-                continue;
-            var pts = Project(raw[0], region, hand.Size, 3, 21);
-            candidates.Add(new HandCandidate(raw[2][0], raw[1][0], pts));
+            if (raw[1][0] < .6f)
+                return;
+            var points = Project(raw[0], region, hand.Size, 3, 21);
+            bool InFrame(int i) => Motion.Inside(points[i], image.Width, image.Height);
+            if (!InFrame(0) || !(InFrame(5) || InFrame(9) || InFrame(13) || InFrame(17)))
+                return;
+            candidates.Add(new(raw[2][0], raw[1][0], points));
         }
-        return AssignHands(candidates, body, visible);
+        foreach (var d in BlazeDetector.Find(palm, image, whole, false, .5f, 2))
+            Measure(d);
+        void Search(Vector2 center, float size)
+        {
+            if (
+                size < 16
+                || candidates.Any(h => Vector2.Distance(XY(h.Points[0]), center) < size * .23f)
+            )
+                return;
+            var detection = BlazeDetector
+                .Find(palm, image, new Crop(center, size), false, .53f, 1)
+                .FirstOrDefault();
+            if (detection != null)
+                Measure(detection);
+        }
+        if (body.Length == 33 && candidates.Count < 2)
+        {
+            float shoulderSpan = Vector2.Distance(XY(body[11]), XY(body[12]));
+            for (int side = 0; side < 2; side++)
+            {
+                int wrist = 15 + side,
+                    elbow = 13 + side;
+                if (visible[wrist] < .55f || !Motion.Inside(body[wrist], image.Width, image.Height))
+                    continue;
+                var forearm = XY(body[wrist]) - XY(body[elbow]);
+                float span = Math.Max(shoulderSpan * .40f, forearm.Length());
+                Search(XY(body[wrist]) + forearm * .16f, Math.Max(42, span * 2.2f));
+            }
+        }
+        // History selects a search window only. Both palm and hand networks must confirm this frame.
+        if (candidates.Count < 2)
+            foreach (var previous in lastHands)
+            {
+                var wrist = XY(previous.Points[0]);
+                var center = (wrist + XY(previous.Points[9])) / 2;
+                float radius = previous.Points.Max(p => Vector2.Distance(center, XY(p)));
+                Search(center, Math.Max(42, radius * 3.5f));
+            }
+        lastHands = AssignHands(candidates, body, visible);
+        return lastHands;
     }
 
     internal sealed record HandCandidate(float RightProbability, float Presence, Vector3[] Points);
