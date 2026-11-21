@@ -1,0 +1,12 @@
+.gitignore text eol=lf
+*.cs text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.hlsl text eol=lf
+*.csproj text eol=lf
+*.slnx text eol=lf
+*.ps1 text eol=lf
+*.mjs text eol=lf
+*.pmx binary
+*.pmd binary
+*.png binary

@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/MmdLive/MmdLive.csproj" />
+  <Project Path="tests/MmdLive.Checks/MmdLive.Checks.csproj" />
+</Solution>

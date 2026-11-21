@@ -1,0 +1,50 @@
+[
+  {
+    "file": "blendshape_subset.json",
+    "url": "https://huggingface.co/t9749/mediapipe-face-landmarker-onnx/resolve/5c3cc92b90fee044d05504404ed52983b3fd8eab/blendshape_subset.json",
+    "bytes": 685,
+    "sha256": "3f796ae3c0deab1151760e0388a2e8590607f2e265829868204131d6880118ba"
+  },
+  {
+    "file": "face_blendshapes.onnx",
+    "url": "https://huggingface.co/t9749/mediapipe-face-landmarker-onnx/resolve/5c3cc92b90fee044d05504404ed52983b3fd8eab/face_blendshapes.onnx",
+    "bytes": 1883829,
+    "sha256": "3f2e7be8748d33766f8078f7165ab1da72aad0c90956ad56b0046eca96134715"
+  },
+  {
+    "file": "face_detector.onnx",
+    "url": "https://huggingface.co/t9749/mediapipe-face-landmarker-onnx/resolve/5c3cc92b90fee044d05504404ed52983b3fd8eab/face_detector.onnx",
+    "bytes": 418475,
+    "sha256": "c0a93c2f5bbe0fafeb24c0ae3443f9f941f0e3e9019e0ac69453a2e638cb3242"
+  },
+  {
+    "file": "face_landmarks_detector.onnx",
+    "url": "https://huggingface.co/t9749/mediapipe-face-landmarker-onnx/resolve/5c3cc92b90fee044d05504404ed52983b3fd8eab/face_landmarks_detector.onnx",
+    "bytes": 4921016,
+    "sha256": "3cdfb2d9d9b3cfea1420e399e4a580b020083f91440ca68d3682bd0f2626a2e3"
+  },
+  {
+    "file": "hand.onnx",
+    "url": "https://media.githubusercontent.com/media/opencv/opencv_zoo/48b10fa505aeb51fbd127fc60a5c660040e823b7/models/handpose_estimation_mediapipe/handpose_estimation_mediapipe_2023feb.onnx",
+    "bytes": 4099621,
+    "sha256": "db0898ae717b76b075d9bf563af315b29562e11f8df5027a1ef07b02bef6d81c"
+  },
+  {
+    "file": "palm.onnx",
+    "url": "https://media.githubusercontent.com/media/opencv/opencv_zoo/48b10fa505aeb51fbd127fc60a5c660040e823b7/models/palm_detection_mediapipe/palm_detection_mediapipe_2023feb.onnx",
+    "bytes": 3905734,
+    "sha256": "78ff51c38496b7fc8b8ebdb6cc8c1abb02fa6c38427c6848254cdaba57fcce7c"
+  },
+  {
+    "file": "person.onnx",
+    "url": "https://media.githubusercontent.com/media/opencv/opencv_zoo/48b10fa505aeb51fbd127fc60a5c660040e823b7/models/person_detection_mediapipe/person_detection_mediapipe_2023mar.onnx",
+    "bytes": 11990159,
+    "sha256": "47fd5599d6fa17608f03e0eb0ae230baa6e597d7e8a2c8199fe00abea55a701f"
+  },
+  {
+    "file": "pose.onnx",
+    "url": "https://media.githubusercontent.com/media/opencv/opencv_zoo/48b10fa505aeb51fbd127fc60a5c660040e823b7/models/pose_estimation_mediapipe/pose_estimation_mediapipe_2023mar.onnx",
+    "bytes": 5557238,
+    "sha256": "9d89c599319a18fb7d2e28451a883476164543182bafca5f09eb2cf767ed2f3f"
+  }
+]

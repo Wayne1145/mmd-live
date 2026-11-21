@@ -1,1 +1,14 @@
 /.worktrees/
+/.tools/
+/artifacts/
+/local/
+**/bin/
+**/obj/
+.vs/
+*.user
+*.pmx
+*.pmd
+
+# Tracking weights are downloaded and verified by the build script.
+/assets/models/*.onnx
+!assets/studio/StudioPilot.pmx
