@@ -11,32 +11,6 @@ internal sealed class TrackingPreview : Control
 {
     static readonly Color RawColor = Color.FromArgb(59, 237, 215),
         RigColor = Color.FromArgb(255, 176, 66);
-    static readonly int[][] BodyPaths =
-    [
-        [11, 12, 24, 23, 11],
-        [11, 13, 15],
-        [12, 14, 16],
-        [23, 25, 27, 29, 31, 27],
-        [24, 26, 28, 30, 32, 28],
-    ];
-    static readonly int[][] FingerPaths =
-    [
-        [0, 1, 2, 3, 4],
-        [0, 5, 6, 7, 8],
-        [5, 9, 10, 11, 12],
-        [9, 13, 14, 15, 16],
-        [13, 17, 18, 19, 20],
-        [0, 17],
-    ];
-    static readonly int[][] FacePaths =
-    [
-        [10, 338, 284, 389, 454, 397, 378, 152, 149, 172, 234, 162, 54, 109, 10],
-        [33, 160, 158, 133, 153, 144, 33],
-        [362, 385, 387, 263, 373, 380, 362],
-        [61, 40, 37, 0, 267, 270, 291, 321, 314, 17, 84, 91, 61],
-        [78, 13, 308, 14, 78],
-        [168, 1, 2],
-    ];
     readonly Pen rawPen = new(RawColor, 1.65f),
         rigPen = new(RigColor, 2f);
     readonly SolidBrush rawDot = new(RawColor),
@@ -47,6 +21,7 @@ internal sealed class TrackingPreview : Control
         avatar;
     RigSnapshot? pose;
     Matrix4x4 projection;
+    bool fullBody;
     Point? pointer;
     bool showBones;
 
@@ -107,10 +82,11 @@ internal sealed class TrackingPreview : Control
         return avatar;
     }
 
-    public void SetPose(RigSnapshot snapshot, Matrix4x4 viewProjection)
+    public void SetPose(RigSnapshot snapshot, Matrix4x4 viewProjection, bool full)
     {
         pose = snapshot;
         projection = viewProjection;
+        fullBody = full;
         Invalidate();
     }
 
@@ -184,7 +160,7 @@ internal sealed class TrackingPreview : Control
         g.SmoothingMode = SmoothingMode.AntiAlias;
         var save = g.Save();
         g.SetClip(box);
-        DrawDetected(g, m, box);
+        ObservedSkeleton.Draw(g, m, box, fullBody, rawPen, rawDot);
         if (pose?.Alignment is { } align)
             DrawRig(g, box, p =>
             {
@@ -229,88 +205,13 @@ internal sealed class TrackingPreview : Control
             g.Restore(save);
         }
         string aligned = pose?.Alignment is { } a ? $"按{a.Anchor}对齐" : "等待对齐点";
-        string held = HeldChannels(Sample);
         string caption = BoneUnderPointer()
             ?? (
-                held.Length > 0
-                    ? $"暂持上一姿势 · {held}   |   {aligned}"
-                    : $"{aligned}   |   指向橙色骨节查看模型骨名"
+                pose?.Bones.Length > 0
+                    ? $"{aligned}   |   指向橙色骨节查看模型骨名"
+                    : "当前帧没有可驱动的骨骼"
             );
         Label(g, caption, new(8, Height - footer, Width - 12, footer), ForeColor);
-    }
-
-    static string HeldChannels(InputSample s)
-    {
-        var missing = new List<string>(4);
-        if (s.Detected.Face.Length == 0 && s.Driven.Face.Length > 0)
-            missing.Add("脸");
-        if (s.Detected.Body.Length == 0 && s.Driven.Body.Length > 0)
-            missing.Add("身体");
-        foreach (var hand in s.Driven.Hands)
-            if (!s.Detected.Hands.Any(h => h.Left == hand.Left))
-                missing.Add(hand.Left ? "左手" : "右手");
-        return string.Join("、", missing);
-    }
-
-    void DrawDetected(Graphics g, Motion m, RectangleF box)
-    {
-        PointF Map(Vector3 p) => Pixel(box, p.X, p.Y, m.Width, m.Height);
-        void Dot(Vector3 p, float r)
-        {
-            var a = Map(p);
-            g.FillEllipse(rawDot, a.X - r, a.Y - r, r * 2, r * 2);
-        }
-        void Paths(Vector3[] points, int[][] paths, float[]? vis = null)
-        {
-            foreach (var path in paths)
-                for (int i = 1; i < path.Length; i++)
-                {
-                    int a = path[i - 1],
-                        b = path[i];
-                    if (vis != null && (vis[a] < .4f || vis[b] < .4f))
-                        continue;
-                    g.DrawLine(rawPen, Map(points[a]), Map(points[b]));
-                }
-        }
-        void Bounds(Vector3[] points)
-        {
-            var min = new Vector2(float.PositiveInfinity);
-            var max = new Vector2(float.NegativeInfinity);
-            foreach (var p in points)
-            {
-                var xy = new Vector2(p.X, p.Y);
-                min = Vector2.Min(min, xy);
-                max = Vector2.Max(max, xy);
-            }
-            var a = Pixel(box, min.X, min.Y, m.Width, m.Height);
-            var b = Pixel(box, max.X, max.Y, m.Width, m.Height);
-            using var border = new Pen(Color.FromArgb(135, RawColor), 1)
-            {
-                DashStyle = DashStyle.Dot,
-            };
-            g.DrawRectangle(border, a.X - 2, a.Y - 2, b.X - a.X + 4, b.Y - a.Y + 4);
-        }
-        if (m.Body.Length == 33)
-        {
-            Paths(m.Body, BodyPaths, m.Visibility);
-            for (int i = 11; i < 33; i++)
-                if (m.Visibility[i] >= .4f)
-                    Dot(m.Body[i], 2.25f);
-        }
-        if (m.Face.Length == 478)
-        {
-            Paths(m.Face, FacePaths);
-            Dot(m.Face[468], 2);
-            Dot(m.Face[473], 2);
-            Bounds(m.Face);
-        }
-        foreach (var h in m.Hands)
-        {
-            Paths(h.Points, FingerPaths);
-            foreach (var p in h.Points)
-                Dot(p, 1.7f);
-            Bounds(h.Points);
-        }
     }
 
     void DrawRig(Graphics g, RectangleF bounds, Func<Vector3, PointF> map)

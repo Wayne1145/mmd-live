@@ -40,10 +40,15 @@ internal sealed class Grounding
         if (ReferenceEquals(previous, motion))
             return rootOffset;
         previous = motion;
-        if (motion.Body.Length < 33 || motion.Visibility[23] < .45f || motion.Visibility[24] < .45f)
+        if (!motion.Sees(23) || !motion.Sees(24) || !motion.Sees(11) || !motion.Sees(12))
         {
             foreach (var f in feet)
+            {
                 f.Contact = false;
+                f.Anchor = null;
+                f.LastPixel = null;
+                f.StableSamples = 0;
+            }
             return rootOffset;
         }
         var p = motion.Body;
@@ -66,12 +71,9 @@ internal sealed class Grounding
             ),
             .28f
         );
-        if (motion.Visibility[27] > .55f || motion.Visibility[28] > .55f)
+        if (motion.Sees(27) || motion.Sees(28))
         {
-            float low = Math.Max(
-                motion.Visibility[27] > .55f ? p[27].Y : 0,
-                motion.Visibility[28] > .55f ? p[28].Y : 0
-            );
+            float low = Math.Max(motion.Sees(27) ? p[27].Y : 0, motion.Sees(28) ? p[28].Y : 0);
             floor = floor == 0 ? low : Math.Max(low, floor - shoulderWidth * .009f);
         }
         for (int i = 0; i < 2; i++)
@@ -82,7 +84,8 @@ internal sealed class Grounding
                 ? Vector2.Distance(pixel, last)
                 : float.PositiveInfinity;
             bool stable =
-                motion.Visibility[27 + i] > .57f
+                motion.Sees(27 + i)
+                && motion.Visibility[27 + i] > .57f
                 && floor - pixel.Y < shoulderWidth * .22f
                 && speed < shoulderWidth * .045f;
             f.StableSamples = stable ? f.StableSamples + 1 : 0;

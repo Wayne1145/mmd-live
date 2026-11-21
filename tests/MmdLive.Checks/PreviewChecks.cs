@@ -17,15 +17,15 @@ internal static class PreviewChecks
     internal static void Contracts(AvatarRig rig, Motion face)
     {
         using var box = new PreviewMailbox();
-        var first = new InputSample(face, face, 1);
-        var second = new InputSample(Motion.Empty, face, 2);
+        var first = new InputSample(face, 1);
+        var second = new InputSample(Motion.Empty, 2);
         box.Publish(first, new Bitmap(8, 8));
         var secondPixels = new Bitmap(12, 12);
         box.Publish(second, secondPixels);
         Require(
             ReferenceEquals(box.Read(out var image), second)
                 && ReferenceEquals(image, secondPixels),
-            "image and raw/held pose must travel together"
+            "image and current pose must travel together"
         );
         image!.Dispose();
         box.Read(out var consumed);

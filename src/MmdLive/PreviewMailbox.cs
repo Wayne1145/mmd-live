@@ -4,9 +4,14 @@ using OpenCvSharp;
 
 namespace MmdLive;
 
-internal sealed record InputSample(Motion Detected, Motion Driven, long Stamp)
+internal sealed record InputSample(Motion Detected, long Stamp, bool Still = false)
 {
-    public static readonly InputSample Empty = new(Motion.Empty, Motion.Empty, 0);
+    public bool Expired(long now) =>
+        !Still
+        && Stamp != 0
+        && System.Diagnostics.Stopwatch.GetElapsedTime(Stamp, now).TotalMilliseconds > 500;
+
+    public static readonly InputSample Empty = new(Motion.Empty, 0);
 }
 
 // A Bitmap has exactly one owner: the pending slot or the UI. A slow UI skips whole frames.
@@ -62,9 +67,9 @@ internal sealed class PreviewMailbox : IDisposable
         }
     }
 
-    public static Bitmap Downsample(Mat bgr)
+    public static Bitmap Downsample(Mat bgr, int maxSide = 720)
     {
-        float scale = Math.Min(1f, 720f / Math.Max(bgr.Width, bgr.Height));
+        float scale = Math.Min(1f, (float)maxSide / Math.Max(bgr.Width, bgr.Height));
         int w = Math.Max(1, (int)MathF.Round(bgr.Width * scale));
         int h = Math.Max(1, (int)MathF.Round(bgr.Height * scale));
         var bitmap = new Bitmap(w, h, PixelFormat.Format24bppRgb);

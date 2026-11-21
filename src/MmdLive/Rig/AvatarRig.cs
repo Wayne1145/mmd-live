@@ -60,6 +60,7 @@ internal sealed partial class AvatarRig
             Add(morphs, Model.Morphs[i].NameEN, i);
         }
         order = Hierarchy(Model.Bones);
+        PrepareArms();
         Apply(Motion.Empty, true, 1);
     }
 
@@ -141,6 +142,7 @@ internal sealed partial class AvatarRig
             if (i >= 0)
                 morphs[Key(canonical)] = i;
         }
+        PrepareArms();
     }
 
     public void Calibrate(Motion m) => neutral = (float[])m.Expressions.Clone();
@@ -148,6 +150,7 @@ internal sealed partial class AvatarRig
     public void Apply(Motion m, bool full, float smoothing, RigTrace? trace = null)
     {
         var targets = Enumerable.Repeat(Quaternion.Identity, rotations.Length).ToArray();
+        var orientations = new Dictionary<int, Quaternion>();
         var absolute = new Dictionary<int, (Vector3 rest, Vector3 target)>();
         void Aim(int bone, int end, Vector3 direction)
         {
@@ -168,19 +171,21 @@ internal sealed partial class AvatarRig
                 trace?.Mark(bone);
             }
         }
+        int spine = Bone("上半身", "spine");
         if (m.Body.Length >= 33)
         {
             var p = m.Body;
             void Pair(int a, int b, int joint, int child)
             {
-                if (m.Visibility[a] > .38f && m.Visibility[b] > .38f)
+                if (m.Sees(a) && m.Sees(b))
                     Aim(joint, child, p[b] - p[a]);
             }
-            if (
-                m.Visibility[11] > .4f
-                && m.Visibility[12] > .4f
-                && Math.Min(m.Visibility[23], m.Visibility[24]) > .3f
-            )
+            if (!full && spine >= 0 && HalfSpine(m, out var facing))
+            {
+                orientations[spine] = facing;
+                trace?.Mark(spine, Bone("首", "neck", "上半身2"));
+            }
+            if (full && m.Sees(11) && m.Sees(12) && m.Sees(23) && m.Sees(24))
             {
                 // Image-relative Z is useful for locating limbs but exaggerates a torso seen from below.
                 var torso = m.WorldBody.Length == 33 ? m.WorldBody : p;
@@ -284,7 +289,32 @@ internal sealed partial class AvatarRig
                     s + jp[digit] + (segment == 0 ? "根" : "先")
                 );
             }
-            Aim(Bone(s + "手首", e + "wrist", e + "hand"), Digit(2, 0), p[9] - p[0]);
+            int wrist = Bone(s + "手首", e + "wrist", e + "hand"),
+                middle = Digit(2, 0),
+                index = Digit(1, 0),
+                little = Digit(4, 0);
+            if (
+                wrist >= 0
+                && middle >= 0
+                && index >= 0
+                && little >= 0
+                && m.Sees(p[0])
+                && m.Sees(p[9])
+                && m.Sees(p[5])
+                && m.Sees(p[17])
+                && (p[9] - p[0]).LengthSquared() > .001f
+            )
+            {
+                orientations[wrist] = PalmRotation(
+                    Model.Bones[middle].Position - Model.Bones[wrist].Position,
+                    Model.Bones[index].Position - Model.Bones[little].Position,
+                    ToModel(p[9] - p[0]),
+                    ToModel(p[5] - p[17])
+                );
+                trace?.Mark(wrist, middle);
+            }
+            else if (m.Sees(p[0]) && m.Sees(p[9]))
+                Aim(wrist, middle, p[9] - p[0]);
             for (int finger = 0; finger < 5; finger++)
             for (int part = 0; part < 3; part++)
             {
@@ -293,6 +323,8 @@ internal sealed partial class AvatarRig
                 if (joint < 0)
                     continue;
                 int k = 1 + 4 * finger + part;
+                if (!m.Sees(p[k]) || !m.Sees(p[k + 1]))
+                    continue;
                 var direction = p[k + 1] - p[k];
                 if (next >= 0)
                     Aim(joint, next, direction);
@@ -322,7 +354,8 @@ internal sealed partial class AvatarRig
                 foreach (var x in offsets)
                     if ((uint)x.BoneIndex < (uint)targets.Length)
                     {
-                        trace?.Mark(x.BoneIndex);
+                        if (m.Face.Length == 478)
+                            trace?.Mark(x.BoneIndex);
                         translation[x.BoneIndex] += x.Translation * effective[i];
                         targets[x.BoneIndex] *= Quaternion.Slerp(
                             Quaternion.Identity,
@@ -344,7 +377,7 @@ internal sealed partial class AvatarRig
             if (center >= 0)
             {
                 translation[center] += delta;
-                if (m.Visibility[23] >= .45f && m.Visibility[24] >= .45f)
+                if (m.Sees(23) && m.Sees(24))
                     trace?.Mark(center);
             }
         }
@@ -369,7 +402,7 @@ internal sealed partial class AvatarRig
                 * Matrix4x4.CreateFromQuaternion(global[i])
                 * Matrix4x4.CreateTranslation(positions[i]);
         }
-        foreach (int i in order)
+        void Solve(int i)
         {
             var b = Model.Bones[i];
             int parent = b.ParentIndex;
@@ -378,6 +411,8 @@ internal sealed partial class AvatarRig
             // The face mesh already measures the head in the camera frame, including torso motion.
             if (i == head && headInCamera is { } orientation)
                 target = Quaternion.Inverse(parentQ) * orientation * target;
+            if (orientations.TryGetValue(i, out var worldOrientation))
+                target = Quaternion.Inverse(parentQ) * worldOrientation * target;
             if (absolute.TryGetValue(i, out var aim))
                 target = FromTo(
                     aim.rest,
@@ -396,9 +431,26 @@ internal sealed partial class AvatarRig
                             Math.Clamp(b.AppendBoneRatio, -1, 1)
                         )
                 );
-            rotations[i] = Quaternion.Slerp(rotations[i], target, smoothing);
+            float amount =
+                (upperLimb[i] && absolute.ContainsKey(i)) || orientations.ContainsKey(i)
+                    ? Response(rotations[i], target, smoothing)
+                    : smoothing;
+            // Ease an unobserved limb back to its rest pose without reporting or replaying any observations.
+            if (
+                (upperLimb[i] || i == spine)
+                && !absolute.ContainsKey(i)
+                && !orientations.ContainsKey(i)
+                && Math.Abs(target.W) > .99999f
+            )
+                amount = 1 - MathF.Pow(1 - smoothing, .22f);
+            rotations[i] = Quaternion.Slerp(rotations[i], target, amount);
             Compose(i);
         }
+        foreach (int i in shoulderParents)
+            Solve(i);
+        PlaceArms(m, translation, absolute, trace);
+        foreach (int i in remainingBones)
+            Solve(i);
         if (full && m.Body.Length == 33)
         {
             foreach (bool left in new[] { true, false })
@@ -412,6 +464,9 @@ internal sealed partial class AvatarRig
                     hip < 0
                     || knee < 0
                     || ankle < 0
+                    || !m.Sees(left ? 23 : 24)
+                    || !m.Sees(left ? 25 : 26)
+                    || !m.Sees(left ? 27 : 28)
                     || !grounding.Plant(left, positions[ankle], out var target)
                 )
                     continue;

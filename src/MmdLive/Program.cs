@@ -69,14 +69,22 @@ internal static class Program
             int repeat = Math.Clamp(int.Parse(Value("--repeat") ?? "1"), 1, 1000000);
             var timings = new double[repeat];
             Motion motion = Motion.Empty;
+            var trace = new RigTrace();
             for (int i = 0; i < repeat; i++)
             {
                 motion = tracker.Track(frame);
-                avatar.Apply(motion, render.FullBody, 1);
+                avatar.Apply(motion, render.FullBody, 1, i == repeat - 1 ? trace : null);
                 render.Render();
                 timings[i] = motion.Milliseconds;
             }
             render.SavePng(Path.Combine(directory, "avatar.png"));
+            ObservedSkeleton.Save(
+                frame,
+                Path.Combine(directory, "overlay.png"),
+                motion,
+                avatar.Snapshot(trace, motion),
+                render.FullBody
+            );
             DrawLandmarks(frame, motion);
             Cv2.ImWrite(Path.Combine(directory, "landmarks.jpg"), frame);
             File.WriteAllText(
@@ -129,10 +137,11 @@ internal static class Program
         foreach (var p in m.Face)
             Dot(p, new Scalar(170, 195, 55), 1);
         for (int i = 0; i < m.Body.Length; i++)
-            if (m.Visibility[i] > .45f)
+            if (i >= 11 && (i < 17 || i > 22) && m.Sees(i))
                 Dot(m.Body[i], new Scalar(80, 170, 255), 3);
         foreach (var hand in m.Hands)
         foreach (var p in hand.Points)
-            Dot(p, hand.Left ? new Scalar(150, 240, 40) : new Scalar(240, 100, 180), 3);
+            if (m.Sees(p))
+                Dot(p, hand.Left ? new Scalar(150, 240, 40) : new Scalar(240, 100, 180), 3);
     }
 }

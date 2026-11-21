@@ -651,7 +651,7 @@ internal sealed class StudioForm : Form
         if (renderer == null || input == null)
             return;
         var sample = input.Read(out var bitmap);
-        var m = sample.Driven;
+        var m = sample.Detected;
         long now = Environment.TickCount64;
         if (bitmap != null)
             preview.SetInput(sample, bitmap);
@@ -676,7 +676,7 @@ internal sealed class StudioForm : Form
         if (trace != null && renderer.Rig is { } rig)
         {
             var snapshot = rig.Snapshot(trace, sample.Detected);
-            preview.SetPose(snapshot, renderer.ViewProjection);
+            preview.SetPose(snapshot, renderer.ViewProjection, renderer.FullBody);
             SetBoneNames(string.Join("  ·  ", snapshot.Bones.Select(b => b.Name)));
             previewDirty = false;
             lastPreview = now;
