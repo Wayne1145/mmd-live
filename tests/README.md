@@ -22,3 +22,13 @@ node tests/obs-capture.mjs <便携实例的obs-websocket配置JSON路径> ./arti
 ```
 
 像素检查对透明区域比较黑白底色，并对不透明区域比较两次捕获的相同颜色。输出还包含半透明像素计数。运行时应使用同一静态人物姿态。
+
+## Windows 10、Windows 11 与实机显卡验证
+
+`Test-ReleaseGpu.ps1` 直接运行已解压的 Windows 发布包。它使用同一张可见人脸和双手的照片，在 1920×1080 的 RGBA 帧上检查角色由中性姿势变为照片中的姿势。另两组测试分别使用竖拇指和伸食指照片及其水平镜像，核对左右侧别和每只手的 21 个归一化关节坐标。参照数据来自 Google MediaPipe，脚本校验每份样本的 SHA-256。
+
+```powershell
+.\tests\Test-ReleaseGpu.ps1 -ReleaseDirectory 'D:\MmdLive' -ResultsDirectory '.\artifacts\verification' -Vendor AMD
+```
+
+NVIDIA 机器使用 `-Vendor NVIDIA`。多显卡设备可用 `-AdapterIndex 1` 等 DXGI 序号选择 GPU。`-ModelPath` 可以指定要验收的真实 PMX 或 PMD，`-FixtureDirectory` 可以指定已下载的固定照片和参照文件。结果文件 `station.json` 记录实际 Windows build、显卡 PCI 厂商、驱动、程序集散列、输入散列、透明像素及姿势变化，并列出四个手势案例的归一化坐标误差。实际摄像头的采集模式和 AMD、Windows 10 的运行情况需要分别在目标设备上测量。
