@@ -19,6 +19,7 @@
 
 ```powershell
 ./scripts/dotnet.ps1 run --no-build -c Release --project tests/MmdLive.Checks -- preview ./assets/studio/StudioPilot.pmx ./local/woman_hands.jpg ./artifacts/preview
+./scripts/dotnet.ps1 run --no-build -c Release --project tests/MmdLive.Checks -- preview ./assets/studio/StudioPilot.pmx ./local/thanks-1440.avi ./artifacts/preview-video --video
 ```
 
 ## OBS 游戏捕获验收

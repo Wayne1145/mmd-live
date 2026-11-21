@@ -23,7 +23,7 @@ internal static class Check
                 Contracts(args[1]);
                 break;
             case "preview":
-                PreviewChecks.Studio(args[1], args[2], args[3]);
+                PreviewChecks.Studio(args[1], args[2], args[3], args.Contains("--video"));
                 break;
             case "upright":
                 UprightPlayback(args[1], args[2]);

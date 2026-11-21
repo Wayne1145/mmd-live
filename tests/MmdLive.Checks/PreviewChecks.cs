@@ -90,16 +90,16 @@ internal static class PreviewChecks
         rig.Bind(new(), new());
     }
 
-    // Exercises the same tab, checkbox and stop button that a camera user operates, using a still image.
-    internal static void Studio(string model, string image, string directory)
+    // Exercises the same tab, checkbox and stop button that a camera user operates, using a file source.
+    internal static void Studio(string model, string source, string directory, bool video)
     {
         Application.EnableVisualStyles();
         Directory.CreateDirectory(directory);
         using var studio = new StudioForm([
             "--model",
             model,
-            "--image",
-            image,
+            video ? "--video" : "--image",
+            source,
             "--settings-dir",
             Path.Combine(directory, "profiles"),
         ]);
@@ -115,7 +115,8 @@ internal static class PreviewChecks
         var clock = Stopwatch.StartNew();
         Exception? error = null;
         int stage = 0;
-        long last = 0;
+        long last = 0,
+            firstStamp = 0;
         using var original = new MemoryStream();
         Bitmap Grab(Control c)
         {
@@ -135,6 +136,7 @@ internal static class PreviewChecks
                 {
                     Require(preview.Visible, "source start must select the preview tab");
                     check.Checked = false;
+                    firstStamp = preview.Sample.Stamp;
                     using var b = Grab(preview);
                     b.Save(original, ImageFormat.Png);
                     b.Save(Path.Combine(directory, "raw.png"));
@@ -183,10 +185,14 @@ internal static class PreviewChecks
                     using var b = Grab(preview);
                     using var stream = new MemoryStream();
                     b.Save(stream, ImageFormat.Png);
-                    Require(
-                        original.ToArray().SequenceEqual(stream.ToArray()),
-                        "turning the overlay off restores unannotated pixels"
-                    );
+                    bool identical = original.ToArray().SequenceEqual(stream.ToArray());
+                    if (video)
+                        Require(
+                            !identical && preview.Sample.Stamp > firstStamp,
+                            "live input advances to new pixels and a new capture timestamp"
+                        );
+                    else
+                        Require(identical, "turning the overlay off restores unannotated pixels");
                     stop.PerformClick();
                     stage++;
                 }
@@ -217,6 +223,6 @@ internal static class PreviewChecks
         if (error != null)
             throw new InvalidDataException("Studio preview regression", error);
         Require(stage == 3, "interactive preview did not run to completion");
-        Console.WriteLine("Studio photo preview, both overlays, checkbox and stop passed.");
+        Console.WriteLine("Studio input preview, both overlays, checkbox and stop passed.");
     }
 }
