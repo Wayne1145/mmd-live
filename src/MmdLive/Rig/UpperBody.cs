@@ -227,6 +227,8 @@ internal sealed partial class AvatarRig
             var handPixel = hand != null ? XY(hand.Points[0]) : XY(m.Body[wrist]);
             var origin = side == 0 ? left : right;
             var targetXY = XY(modelCenter - origin) - (handPixel - imageCenter) * units;
+            if (hand != null && FaceTarget(m, hand, handPixel) is { } face)
+                targetXY = Vector2.Lerp(targetXY, face.Target - XY(origin), face.Weight);
             var upperRest = Model.Bones[arm.Elbow].Position - Model.Bones[arm.Shoulder].Position;
             var lowerRest = Model.Bones[arm.Wrist].Position - Model.Bones[arm.Elbow].Position;
             float upper = upperRest.Length(),
@@ -349,6 +351,39 @@ internal sealed partial class AvatarRig
                 trace?.Targets.Remove(arm.Elbow);
             }
         }
+    }
+
+    // Shoulder-relative placement scales the hand by shoulder width. Heads sit at different
+    // heights above the shoulders on a person and on an avatar (most of all on chibi or robot
+    // models), so a hand on the performer's chin landed on the avatar's chest. Near the face,
+    // measure the wrist from the chin in face heights and place it the same way from the
+    // avatar's head bone, scaled by the avatar's head height. Further out, blend back.
+    const float FaceNear = 1.4f,
+        FaceFar = 2.6f;
+
+    // Chin to the top of the skull is about 1.35 times chin to the forehead landmark.
+    const float SkullPerFaceHeight = 1.35f;
+
+    (Vector2 Target, float Weight)? FaceTarget(Motion m, Hand hand, Vector2 wristPixel)
+    {
+        int head = map.Head;
+        if (m.Face.Length != FaceLandmark.Count || head < 0 || hand.Points.Length != HandLandmark.Count)
+            return null;
+        float headHeight = Max.Y - Model.Bones[head].Position.Y;
+        var chin = XY(m.Face[FaceLandmark.Chin]);
+        var forehead = XY(m.Face[FaceLandmark.Forehead]);
+        float faceHeight = Vector2.Distance(chin, forehead);
+        if (headHeight <= 1e-4f || faceHeight < 8)
+            return null;
+        var handCenter = (XY(hand.Points[HandLandmark.Wrist]) + XY(hand.Points[HandLandmark.MiddleBase])) / 2;
+        float distance = Vector2.Distance(handCenter, (chin + forehead) / 2) / faceHeight;
+        float t = Math.Clamp((FaceFar - distance) / (FaceFar - FaceNear), 0, 1);
+        if (t <= 0)
+            return null;
+        float scale = headHeight / (faceHeight * SkullPerFaceHeight);
+        // Image x and y both point the opposite way to model x and y, as in the shoulder mapping.
+        var target = XY(positions[head]) - (wristPixel - chin) * scale;
+        return (target, t * t * (3 - 2 * t));
     }
 
     // Small angular changes stay quiet; clear gestures can catch up within the current observation.

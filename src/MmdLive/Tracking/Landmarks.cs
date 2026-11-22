@@ -16,6 +16,7 @@ internal static class PoseLandmark
     public const int LeftWrist = 15;
     public const int LeftPinky = 17;
     public const int LeftIndex = 19;
+    public const int LeftThumb = 21;
     public const int LeftHip = 23;
     public const int RightHip = 24;
     public const int LeftKnee = 25;
