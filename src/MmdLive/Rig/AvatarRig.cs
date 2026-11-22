@@ -21,8 +21,24 @@ internal sealed partial class AvatarRig
         morphs = new(StringComparer.OrdinalIgnoreCase);
     float[] neutral = [];
     readonly Grounding grounding = new();
-    static readonly string[] LeftBlink = ["ウィンク", "ウィンク左", "まばたき左", "blinkleft"];
-    static readonly string[] RightBlink = ["ウィンク右", "まばたき右", "winkright", "blinkright"];
+    // Keep both sides symmetric: separate-eye blinking requires a match on each side.
+    static readonly string[] LeftBlink =
+    [
+        "ウィンク",
+        "ウィンク左",
+        "まばたき左",
+        "winkleft",
+        "blinkleft",
+        "eyeblinkleft",
+    ];
+    static readonly string[] RightBlink =
+    [
+        "ウィンク右",
+        "まばたき右",
+        "winkright",
+        "blinkright",
+        "eyeblinkright",
+    ];
 
     public void ResetPoseOrigin() => ResetLiveTracking();
 
@@ -49,16 +65,7 @@ internal sealed partial class AvatarRig
         positions = new Vector3[count];
         Skin = new Matrix4x4[count];
         Weights = new float[Math.Max(1, Model.Morphs.Count)];
-        for (int i = 0; i < count; i++)
-        {
-            Add(bones, Model.Bones[i].Name, i);
-            Add(bones, Model.Bones[i].NameEN, i);
-        }
-        for (int i = 0; i < Model.Morphs.Count; i++)
-        {
-            Add(morphs, Model.Morphs[i].Name, i);
-            Add(morphs, Model.Morphs[i].NameEN, i);
-        }
+        IndexNames();
         order = Hierarchy(Model.Bones);
         PrepareArms();
         Apply(Motion.Empty, true, 1);
@@ -118,6 +125,25 @@ internal sealed partial class AvatarRig
         Dictionary<string, string> morphBindings
     )
     {
+        IndexNames();
+        foreach (var (canonical, name) in boneBindings)
+        {
+            int i = Find(Model.Bones, b => b.Name, b => b.NameEN, name);
+            if (i >= 0)
+                bones[Key(canonical)] = i;
+        }
+        foreach (var (canonical, name) in morphBindings)
+        {
+            int i = Find(Model.Morphs, m => m.Name, m => m.NameEN, name);
+            if (i >= 0)
+                morphs[Key(canonical)] = i;
+        }
+        PrepareArms();
+        ResetLiveTracking();
+    }
+
+    void IndexNames()
+    {
         bones.Clear();
         morphs.Clear();
         for (int i = 0; i < Model.Bones.Count; i++)
@@ -130,20 +156,22 @@ internal sealed partial class AvatarRig
             Add(morphs, Model.Morphs[i].Name, i);
             Add(morphs, Model.Morphs[i].NameEN, i);
         }
-        foreach (var (canonical, name) in boneBindings)
-        {
-            int i = Model.Bones.FindIndex(b => b.Name == name);
-            if (i >= 0)
-                bones[Key(canonical)] = i;
-        }
-        foreach (var (canonical, name) in morphBindings)
-        {
-            int i = Model.Morphs.FindIndex(m => m.Name == name);
-            if (i >= 0)
-                morphs[Key(canonical)] = i;
-        }
-        PrepareArms();
-        ResetLiveTracking();
+    }
+
+    // A saved binding names the exact model item. Fall back to the same normalized
+    // comparison used for automatic matching so width, case or spacing changes still bind.
+    static int Find<T>(List<T> items, Func<T, string> name, Func<T, string> nameEN, string wanted)
+    {
+        if (string.IsNullOrWhiteSpace(wanted))
+            return -1;
+        int exact = items.FindIndex(x => name(x) == wanted);
+        if (exact >= 0)
+            return exact;
+        string key = Key(wanted);
+        return items.FindIndex(x =>
+            (!string.IsNullOrWhiteSpace(name(x)) && Key(name(x)) == key)
+            || (!string.IsNullOrWhiteSpace(nameEN(x)) && Key(nameEN(x)) == key)
+        );
     }
 
     public void Calibrate(Motion m) => neutral = (float[])m.Expressions.Clone();
