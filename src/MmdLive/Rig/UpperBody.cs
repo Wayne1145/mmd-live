@@ -227,7 +227,11 @@ internal sealed partial class AvatarRig
                     ? (m.WorldBody[wrist].Z - m.WorldBody[shoulder].Z)
                         * Vector3.Distance(left, right)
                         / worldSpan
-                    : -.22f * maxReach;
+                    // Without a measured depth keep the arm's current depth. Resetting to a
+                    // default threw the arm forward or back whenever hand and pose disagreed.
+                    : previous is { } held
+                        ? held.Upper.Z + held.Lower.Z
+                        : -.22f * maxReach;
             Vector3? elbowHint = null;
             if (reliableElbow)
             {

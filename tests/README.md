@@ -59,6 +59,14 @@
 
 全身解算加 `--full`。
 
+## 角色抖动
+
+`jitter` 把观测按 30 fps 输入、60 Hz 渲染送入直播解算器，统计上半身、头、双臂各关节每秒转过的角度、单帧超过 8° 的跳变次数和来回反向的次数，以及模型腕点和真人手腕的距离。加 `--frames <目录>` 会把每一帧角色渲染成 PNG，可以用 ffmpeg 和输入视频拼成对照片段直接观看。
+
+```powershell
+./scripts/dotnet.ps1 run --no-build -c Release --project tests/MmdLive.Checks -- jitter ./assets/studio/StudioPilot.pmx ./artifacts/video.ndjson --frames ./artifacts/frames
+```
+
 ## OBS 游戏捕获验收
 
 用独立的 OBS 便携配置准备一个名为 `MmdQA` 的场景，在其 WebSocket 服务中设置测试口令。在同一 Windows 会话中运行本软件并打开一张静态照片。以下脚本连接本机端口，通过 OBS 的窗口列表选取 `MMD Live — OBS Output`，生成黑底、白底和单独游戏源的截图。测试设置及 OBS 统计写入 `obs.json`。

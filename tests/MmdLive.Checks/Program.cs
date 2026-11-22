@@ -28,6 +28,14 @@ internal static class Check
                     args.ElementAtOrDefault(5)
                 );
                 break;
+            case "jitter":
+                Jitter.Run(
+                    args[1],
+                    args[2],
+                    args.Contains("--full"),
+                    Array.IndexOf(args, "--frames") is >= 0 and var f ? args[f + 1] : null
+                );
+                break;
             case "bench":
                 using (var frame = Cv2.ImRead(args[1]))
                     foreach (var file in Directory.GetFiles(Program.Models, "*.onnx").Order())

@@ -5,10 +5,12 @@ namespace MmdLive.Rig;
 internal sealed partial class AvatarRig
 {
     // Palm orientation from the wrist, middle, index and little bases; then each finger segment.
-    void AimHands(Motion m, RigTrace? trace)
+    void AimHands(Motion m, RigTrace? frameTrace)
     {
         foreach (var h in m.Hands)
         {
+            // The preview draws only what this frame observed. A held hand drives silently.
+            var trace = h.Held ? null : frameTrace;
             var b = map.Sides[h.Left ? 0 : 1];
             var p = h.Points;
             int wrist = b.Wrist,

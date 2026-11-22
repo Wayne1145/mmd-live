@@ -6,6 +6,9 @@ namespace MmdLive.Rig;
 internal sealed partial class AvatarRig
 {
     readonly RigTrace liveTrace = new();
+    readonly MotionFilter filter = new();
+    // The filtered form of the latest sample. Render frames between samples reuse this object.
+    Motion filtered = Motion.Empty;
     long lastCapture,
         lastUpdate,
         lostSince;
@@ -19,6 +22,8 @@ internal sealed partial class AvatarRig
         liveTrace.Targets.Clear();
         Array.Clear(lastArm);
         grounding.Reset();
+        filter.Reset();
+        filtered = Motion.Empty;
     }
 
     // Stamps are acquisition times. Motion.Milliseconds measures inference cost, not elapsed motion.
@@ -57,8 +62,16 @@ internal sealed partial class AvatarRig
         float dt = Math.Clamp(elapsed, 0, .05f);
         bool snap = atRest || (!empty && (sample.Still || initial));
         float blend = snap ? 1 : 1 - MathF.Pow(.68f, dt * 60);
+        // Each camera sample passes through the landmark filter once. A still image or a
+        // returning source starts the filter fresh.
+        if (empty || sample.Still || sourceGap > .25f)
+            filter.Reset();
+        if (empty || sample.Still)
+            filtered = sample.Detected;
+        else if (!repeat)
+            filtered = filter.Step(sample.Detected, initial ? 1f / 30 : sourceGap);
         liveTrace.Targets.Clear();
-        Apply(sample.Detected, full, blend, liveTrace, snap ? 0 : dt);
+        Apply(filtered, full, blend, liveTrace, snap ? 0 : dt);
         if (!empty)
         {
             lastCapture = sample.Stamp;

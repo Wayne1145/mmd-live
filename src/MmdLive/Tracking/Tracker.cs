@@ -5,7 +5,12 @@ using OpenCvSharp;
 
 namespace MmdLive.Tracking;
 
-internal sealed record Hand(bool Left, float Confidence, Vector3[] Points);
+internal sealed record Hand(bool Left, float Confidence, Vector3[] Points)
+{
+    // Repeated from an earlier frame by MotionFilter after a brief detection dropout. It still
+    // drives the avatar but is not drawn as observed in the preview.
+    public bool Held { get; init; }
+}
 
 internal sealed record Motion(
     int Width,
