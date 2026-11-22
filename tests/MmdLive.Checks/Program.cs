@@ -123,10 +123,19 @@ internal static class Check
             character.Skin.All(x => Math.Abs(x.M11 - 1) < .00001f && Math.Abs(x.M41) < .0001f),
             "neutral skinning"
         );
-        var requested = new CameraMode(2560, 1440, 30);
+        var requested = new CameraMode(1920, 1080, 60);
         Require(
-            CameraMode.Prefer([new(1920, 1080, 60), new(2560, 1440, 15), requested]) == requested,
-            "1440p native mode selection"
+            CameraMode.Prefer([new(2560, 1440, 30), new(2560, 1440, 15), requested]) == requested,
+            "a 60 fps mode must win over 1440p at 30 fps"
+        );
+        Require(
+            CameraMode.Prefer([new(1280, 720, 60), new(1920, 1080, 60), new(1920, 1080, 30)])
+                == requested,
+            "the largest 60 fps mode must win"
+        );
+        Require(
+            CameraMode.Prefer([new(2560, 1440, 30), new(1920, 1080, 30)])?.Width == 2560,
+            "without 60 fps, 1440p at 30 fps remains the native choice"
         );
         Require(
             CameraMode.Prefer([new(1280, 720, 30), new(1920, 1080, 30)])?.Width == 1920,
