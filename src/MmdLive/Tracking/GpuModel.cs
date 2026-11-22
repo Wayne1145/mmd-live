@@ -22,21 +22,36 @@ internal readonly record struct Crop(Vector2 Center, float Side, float Angle = 0
         MathF.Atan2(tip.Y - wrist.Y, tip.X - wrist.X) + MathF.PI / 2;
 }
 
+// One ONNX model on DirectML. Reuses its crop buffers, so one instance serves one thread.
 internal sealed class GpuModel : IDisposable
 {
     readonly InferenceSession session;
     readonly string input;
     readonly int[] shape;
     readonly bool nchw;
+    readonly Mat pixels = new();
+    readonly float[] affine = new float[6];
+    float[] values = [];
     internal int Size { get; }
+    internal string Name { get; }
+
+    // Cumulative cost for diagnostics: image preparation on the CPU and the inference call.
+    internal int Calls { get; private set; }
+    internal double PrepareMilliseconds { get; private set; }
+    internal double InferMilliseconds { get; private set; }
 
     public GpuModel(string path, int adapter)
     {
+        Name = Path.GetFileNameWithoutExtension(path);
         using var options = new SessionOptions
         {
             EnableMemoryPattern = false,
             ExecutionMode = ExecutionMode.ORT_SEQUENTIAL,
         };
+        // A symbolic batch dimension stops DirectML from compiling one fixed graph. The face
+        // mesh then runs as many small dispatches and costs ~6x more on a laptop GPU.
+        foreach (string symbol in SymbolicInputDimensions(path))
+            options.AddFreeDimensionOverrideByName(symbol, 1);
         options.AppendExecutionProvider_DML(adapter);
         options.AddSessionConfigEntry("session.disable_cpu_ep_fallback", "1");
         try
@@ -57,48 +72,75 @@ internal sealed class GpuModel : IDisposable
         Size = shape.Length == 4 ? shape[2] : 0;
     }
 
+    static string[] SymbolicInputDimensions(string path)
+    {
+        using var probe = new InferenceSession(path);
+        return probe
+            .InputMetadata.Values.SelectMany(v => v.SymbolicDimensions)
+            .Where(s => !string.IsNullOrEmpty(s))
+            .Distinct()
+            .ToArray();
+    }
+
     public float[][] Run(float[] values, params string[] outputs)
     {
+        long start = System.Diagnostics.Stopwatch.GetTimestamp();
         var tensor = new DenseTensor<float>(values, shape);
         var inputs = new[] { NamedOnnxValue.CreateFromTensor(input, tensor) };
         using var results =
             outputs.Length == 0 ? session.Run(inputs) : session.Run(inputs, outputs);
-        return results.Select(x => x.AsTensor<float>().ToArray()).ToArray();
+        var arrays = results.Select(x => x.AsTensor<float>().ToArray()).ToArray();
+        Calls++;
+        InferMilliseconds += System
+            .Diagnostics.Stopwatch.GetElapsedTime(start)
+            .TotalMilliseconds;
+        return arrays;
     }
 
     public unsafe float[][] Image(Mat frame, Crop roi, bool signed, params string[] outputs)
     {
+        // The conversion below reads packed 3-byte BGR pixels.
+        if (frame.Type() != MatType.CV_8UC3)
+            throw new ArgumentException($"追踪输入必须是 8 位 BGR 图像，实际为 {frame.Type()}");
+        long start = System.Diagnostics.Stopwatch.GetTimestamp();
         var origin = roi.Pixel(new(.5f / Size, .5f / Size)) - new Vector2(.5f);
         var dx = roi.Rotate(new(roi.Side / Size, 0));
         var dy = roi.Rotate(new(0, roi.Side / Size));
-        using var affine = Mat.FromPixelData(
-            2,
-            3,
-            MatType.CV_32FC1,
-            new[] { dx.X, dy.X, origin.X, dx.Y, dy.Y, origin.Y }
-        );
-        using var pixels = new Mat();
-        Cv2.WarpAffine(
-            frame,
-            pixels,
-            affine,
-            new OpenCvSharp.Size(Size, Size),
-            InterpolationFlags.Linear | InterpolationFlags.WarpInverseMap,
-            BorderTypes.Constant,
-            Scalar.All(signed ? 127.5 : 0)
-        );
+        (affine[0], affine[1], affine[2]) = (dx.X, dy.X, origin.X);
+        (affine[3], affine[4], affine[5]) = (dx.Y, dy.Y, origin.Y);
+        using (var transform = Mat.FromPixelData(2, 3, MatType.CV_32FC1, affine))
+            Cv2.WarpAffine(
+                frame,
+                pixels,
+                transform,
+                new OpenCvSharp.Size(Size, Size),
+                InterpolationFlags.Linear | InterpolationFlags.WarpInverseMap,
+                BorderTypes.Constant,
+                Scalar.All(signed ? 127.5 : 0)
+            );
+        if (!pixels.IsContinuous())
+            throw new InvalidOperationException("裁切缓冲区不连续");
         var area = Size * Size;
-        var value = new float[area * 3];
+        if (values.Length != area * 3)
+            values = new float[area * 3];
+        var value = values;
         var ptr = (byte*)pixels.DataPointer;
         float scale = signed ? 2f / 255 : 1f / 255,
             bias = signed ? -1 : 0;
         for (int i = 0; i < area; i++)
         for (int c = 0; c < 3; c++)
             value[nchw ? c * area + i : i * 3 + c] = ptr[i * 3 + 2 - c] * scale + bias;
+        PrepareMilliseconds += System
+            .Diagnostics.Stopwatch.GetElapsedTime(start)
+            .TotalMilliseconds;
         return Run(value, outputs);
     }
 
-    public void Dispose() => session.Dispose();
+    public void Dispose()
+    {
+        session.Dispose();
+        pixels.Dispose();
+    }
 }
 
 internal sealed record Detection(Vector2 Center, Vector2 Size, Vector2[] Marks, float Score);

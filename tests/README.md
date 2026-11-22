@@ -44,6 +44,21 @@
 
 `metrics.ndjson` 的角度单位为度，`wristErrorPct` 的单位为输入画面宽度的百分比，无手部观测的帧记为 `null`。比较前后版本时，同时检查可见率、最长连续缺失、快速抬手的到达帧以及腕点误差。
 
+`observe` 结束时还会打印每帧平均追踪耗时，以及每个模型每帧的调用次数、CPU 裁切耗时和推理耗时。
+
+## 重构前后的解算一致性
+
+`rigdump` 把一组观测按 30 fps 输入、60 Hz 渲染送入直播解算器，写出每一步的全部蒙皮矩阵和表情权重，并打印每次解算的平均耗时。只改结构、不改行为的重构，应当和改动前的输出逐位一致，`rigdiff` 会比较两份结果。`bench` 在一张图片上单独测量每个追踪模型的耗时。
+
+```powershell
+./scripts/dotnet.ps1 run --no-build -c Release --project tests/MmdLive.Checks -- rigdump ./assets/studio/StudioPilot.pmx ./artifacts/video.ndjson ./artifacts/before.bin
+./scripts/dotnet.ps1 run --no-build -c Release --project tests/MmdLive.Checks -- rigdump ./assets/studio/StudioPilot.pmx ./artifacts/video.ndjson ./artifacts/after.bin
+./scripts/dotnet.ps1 run --no-build -c Release --project tests/MmdLive.Checks -- rigdiff ./artifacts/before.bin ./artifacts/after.bin
+./scripts/dotnet.ps1 run --no-build -c Release --project tests/MmdLive.Checks -- bench ./local/pose.jpg
+```
+
+全身解算加 `--full`。
+
 ## OBS 游戏捕获验收
 
 用独立的 OBS 便携配置准备一个名为 `MmdQA` 的场景，在其 WebSocket 服务中设置测试口令。在同一 Windows 会话中运行本软件并打开一张静态照片。以下脚本连接本机端口，通过 OBS 的窗口列表选取 `MMD Live — OBS Output`，生成黑底、白底和单独游戏源的截图。测试设置及 OBS 统计写入 `obs.json`。

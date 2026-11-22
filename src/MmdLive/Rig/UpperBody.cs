@@ -15,18 +15,7 @@ internal sealed partial class AvatarRig
 
     void PrepareArms()
     {
-        arms = new[] { ("左", "left"), ("右", "right") }
-            .Select(side => new ArmChain(
-                Bone(side.Item1 + "腕", side.Item2 + "arm", side.Item2 + "upperarm"),
-                Bone(
-                    side.Item1 + "ひじ",
-                    side.Item1 + "肘",
-                    side.Item2 + "elbow",
-                    side.Item2 + "lowerarm"
-                ),
-                Bone(side.Item1 + "手首", side.Item2 + "wrist", side.Item2 + "hand")
-            ))
-            .ToArray();
+        arms = map.Sides.Select(side => new ArmChain(side.Arm, side.Elbow, side.Wrist)).ToArray();
         var parents = new HashSet<int>();
         foreach (var arm in arms)
             if (arm.Shoulder >= 0)

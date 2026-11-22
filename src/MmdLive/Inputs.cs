@@ -20,6 +20,9 @@ internal sealed record Source(SourceKind Kind, string Path, int CameraIndex = 0)
 internal sealed class MotionInput : IDisposable
 {
     readonly int adapter;
+    // Loading seven DirectML sessions takes seconds. Keep them across input switches; only the
+    // worker task touches the tracker, and Stop awaits that task before another starts.
+    Tracking.Tracker? tracker;
     CancellationTokenSource? stop;
     Task work = Task.CompletedTask;
     readonly PreviewMailbox frames = new();
@@ -61,7 +64,8 @@ internal sealed class MotionInput : IDisposable
     {
         try
         {
-            using var tracker = new Tracking.Tracker(Program.Models, adapter);
+            var tracker = this.tracker ??= new Tracking.Tracker(Program.Models, adapter);
+            tracker.Reset();
             if (token.IsCancellationRequested)
                 return;
             if (source.Kind == SourceKind.Image)
@@ -184,6 +188,14 @@ internal sealed class MotionInput : IDisposable
     public void Dispose()
     {
         stop?.Cancel();
+        try
+        {
+            work.Wait(TimeSpan.FromSeconds(2));
+        }
+        catch (AggregateException) { }
+        // A worker that ignores cancellation still owns the tracker. Leave it to process exit.
+        if (work.IsCompleted)
+            tracker?.Dispose();
         frames.Dispose();
     }
 }

@@ -28,6 +28,33 @@ internal static class Check
                     args.ElementAtOrDefault(5)
                 );
                 break;
+            case "bench":
+                using (var frame = Cv2.ImRead(args[1]))
+                    foreach (var file in Directory.GetFiles(Program.Models, "*.onnx").Order())
+                    {
+                        using var model = new MmdLive.Tracking.GpuModel(
+                            file,
+                            GraphicsAdapter.List().First().Index
+                        );
+                        if (model.Size == 0)
+                            continue;
+                        var crop = MmdLive.Tracking.Crop.Whole(frame);
+                        for (int i = 0; i < 10; i++)
+                            model.Image(frame, crop, false);
+                        var clock = System.Diagnostics.Stopwatch.StartNew();
+                        for (int i = 0; i < 100; i++)
+                            model.Image(frame, crop, false);
+                        Console.WriteLine(
+                            $"{Path.GetFileName(file), -32} {model.Size}px {clock.Elapsed.TotalMilliseconds / 100:0.00} ms"
+                        );
+                    }
+                break;
+            case "rigdump":
+                RigDump.Run(args[1], args[2], args[3], args.Contains("--full"));
+                break;
+            case "rigdiff":
+                RigDump.Compare(args[1], args[2]);
+                break;
             case "observe":
                 StabilityReplay.Observe(args[1], args[2], args.Length > 3 ? int.Parse(args[3]) : 0);
                 break;

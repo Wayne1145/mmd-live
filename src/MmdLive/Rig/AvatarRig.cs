@@ -5,11 +5,20 @@ using MmdLive.Tracking;
 
 namespace MmdLive.Rig;
 
+// Retargets one tracked Motion onto an MMD skeleton. The solve runs in stages, each in its own
+// file: body aims (here), face (FaceSolve), hands (HandSolve), arms (UpperBody) and legs
+// (LegSolve). Stages write targets into the per-frame buffers below; SolveHierarchy then
+// eases each bone towards its target in parent-first order.
 internal sealed partial class AvatarRig
 {
+    // Measured bones may turn at most this fast. Wrists may turn faster to follow palm roll.
+    const float MaxTurnDegreesPerSecond = 540;
+    const float MaxWristTurnDegreesPerSecond = 660;
+
     public PMXFormat Model { get; }
     public Matrix4x4[] Skin { get; }
     public float[] Weights { get; }
+    public float[] EffectiveWeights => effective;
     public Vector3 Min { get; }
     public Vector3 Max { get; }
     public string Directory { get; }
@@ -21,24 +30,14 @@ internal sealed partial class AvatarRig
         morphs = new(StringComparer.OrdinalIgnoreCase);
     float[] neutral = [];
     readonly Grounding grounding = new();
-    // Keep both sides symmetric: separate-eye blinking requires a match on each side.
-    static readonly string[] LeftBlink =
-    [
-        "ウィンク",
-        "ウィンク左",
-        "まばたき左",
-        "winkleft",
-        "blinkleft",
-        "eyeblinkleft",
-    ];
-    static readonly string[] RightBlink =
-    [
-        "ウィンク右",
-        "まばたき右",
-        "winkright",
-        "blinkright",
-        "eyeblinkright",
-    ];
+
+    // Per-frame solve buffers, reused to keep the 60 Hz solve allocation free.
+    readonly Quaternion[] targets;
+    readonly Vector3[] translation;
+    readonly float[] want,
+        effective;
+    readonly Dictionary<int, Quaternion> orientations = [];
+    readonly Dictionary<int, (Vector3 rest, Vector3 target)> absolute = [];
 
     public void ResetPoseOrigin() => ResetLiveTracking();
 
@@ -64,9 +63,14 @@ internal sealed partial class AvatarRig
         global = new Quaternion[count];
         positions = new Vector3[count];
         Skin = new Matrix4x4[count];
+        targets = new Quaternion[count];
+        translation = new Vector3[count];
         Weights = new float[Math.Max(1, Model.Morphs.Count)];
+        want = new float[Weights.Length];
+        effective = new float[Weights.Length];
         IndexNames();
         order = Hierarchy(Model.Bones);
+        ResolveMap();
         PrepareArms();
         Apply(Motion.Empty, true, 1);
     }
@@ -80,6 +84,7 @@ internal sealed partial class AvatarRig
             map.TryAdd(Key(name), index);
     }
 
+    // Name lookup for load time and diagnostics only. The per-frame solve reads BoneMap.
     int Bone(params string[] names) => Lookup(bones, names);
 
     static int Lookup(Dictionary<string, int> map, string[] names)
@@ -117,7 +122,7 @@ internal sealed partial class AvatarRig
     public float[] Neutral
     {
         get => neutral;
-        set => neutral = value.Length == 52 ? (float[])value.Clone() : [];
+        set => neutral = value.Length == Blendshape.Count ? (float[])value.Clone() : [];
     }
 
     public void Bind(
@@ -138,6 +143,7 @@ internal sealed partial class AvatarRig
             if (i >= 0)
                 morphs[Key(canonical)] = i;
         }
+        ResolveMap();
         PrepareArms();
         ResetLiveTracking();
     }
@@ -184,212 +190,110 @@ internal sealed partial class AvatarRig
         float stepSeconds = 0
     )
     {
-        var targets = Enumerable.Repeat(Quaternion.Identity, rotations.Length).ToArray();
-        var orientations = new Dictionary<int, Quaternion>();
-        var absolute = new Dictionary<int, (Vector3 rest, Vector3 target)>();
-        void Aim(int bone, int end, Vector3 direction)
+        Array.Fill(targets, Quaternion.Identity);
+        Array.Clear(translation);
+        Array.Clear(want);
+        orientations.Clear();
+        absolute.Clear();
+
+        AimBody(m, full, trace);
+        var headInCamera = SolveFace(m, trace);
+        AimHands(m, trace);
+        BlendMorphs(smoothing, m.Face.Length == FaceLandmark.Count, trace);
+        GroundRoot(m, full, trace);
+        SolveHierarchy(m, smoothing, stepSeconds, headInCamera, trace);
+        PlantFeet(m, full, trace);
+    }
+
+    void Aim(int bone, int end, Vector3 direction, RigTrace? trace)
+    {
+        if (bone < 0 || end < 0 || direction.LengthSquared() < .001f)
+            return;
+        var rest = Model.Bones[end].Position - Model.Bones[bone].Position;
+        if (rest.LengthSquared() > .0001f)
         {
-            if (bone < 0 || end < 0 || direction.LengthSquared() < .001f)
-                return;
-            var rest = Model.Bones[end].Position - Model.Bones[bone].Position;
-            if (rest.LengthSquared() > .0001f)
+            absolute[bone] = (rest, ToModel(direction));
+            trace?.Mark(bone, end);
+        }
+    }
+
+    void Rotate(int bone, Quaternion value, RigTrace? trace)
+    {
+        if (bone >= 0)
+        {
+            targets[bone] = value;
+            trace?.Mark(bone);
+        }
+    }
+
+    // Torso lean and the observed limb segments, aimed bone to bone.
+    void AimBody(Motion m, bool full, RigTrace? trace)
+    {
+        if (m.Body.Length < PoseLandmark.Count)
+            return;
+        var p = m.Body;
+        void Pair(int a, int b, int joint, int child)
+        {
+            if (m.Sees(a) && m.Sees(b))
+                Aim(joint, child, p[b] - p[a], trace);
+        }
+        if (!full && map.Spine >= 0 && HalfSpine(m, out var facing))
+        {
+            orientations[map.Spine] = facing;
+            trace?.Mark(map.Spine, map.Neck);
+        }
+        if (
+            full
+            && m.Sees(PoseLandmark.LeftShoulder)
+            && m.Sees(PoseLandmark.RightShoulder)
+            && m.Sees(PoseLandmark.LeftHip)
+            && m.Sees(PoseLandmark.RightHip)
+        )
+        {
+            // Image-relative Z is useful for locating limbs but exaggerates a torso seen from below.
+            var torso = m.WorldBody.Length == PoseLandmark.Count ? m.WorldBody : p;
+            var up =
+                (
+                    torso[PoseLandmark.LeftShoulder]
+                    + torso[PoseLandmark.RightShoulder]
+                    - torso[PoseLandmark.LeftHip]
+                    - torso[PoseLandmark.RightHip]
+                ) / 2;
+            if (m.WorldBody.Length != PoseLandmark.Count)
+                up.Z = 0;
+            Aim(map.Spine, map.Neck, up, trace);
+        }
+        for (int side = 0; side < 2; side++)
+        {
+            var b = map.Sides[side];
+            Pair(PoseLandmark.LeftShoulder + side, PoseLandmark.LeftElbow + side, b.Arm, b.Elbow);
+            Pair(PoseLandmark.LeftElbow + side, PoseLandmark.LeftWrist + side, b.Elbow, b.Wrist);
+            if (full)
             {
-                absolute[bone] = (rest, ToModel(direction));
-                trace?.Mark(bone, end);
+                Pair(PoseLandmark.LeftHip + side, PoseLandmark.LeftKnee + side, b.Leg, b.Knee);
+                Pair(PoseLandmark.LeftKnee + side, PoseLandmark.LeftAnkle + side, b.Knee, b.Ankle);
+                Pair(PoseLandmark.LeftHeel + side, PoseLandmark.LeftFootIndex + side, b.Ankle, b.Toe);
             }
         }
-        void Rotate(int bone, Quaternion value)
-        {
-            if (bone >= 0)
-            {
-                targets[bone] = value;
-                trace?.Mark(bone);
-            }
-        }
-        int spine = Bone("上半身", "spine");
-        if (m.Body.Length >= 33)
-        {
-            var p = m.Body;
-            void Pair(int a, int b, int joint, int child)
-            {
-                if (m.Sees(a) && m.Sees(b))
-                    Aim(joint, child, p[b] - p[a]);
-            }
-            if (!full && spine >= 0 && HalfSpine(m, out var facing))
-            {
-                orientations[spine] = facing;
-                trace?.Mark(spine, Bone("首", "neck", "上半身2"));
-            }
-            if (full && m.Sees(11) && m.Sees(12) && m.Sees(23) && m.Sees(24))
-            {
-                // Image-relative Z is useful for locating limbs but exaggerates a torso seen from below.
-                var torso = m.WorldBody.Length == 33 ? m.WorldBody : p;
-                var up = (torso[11] + torso[12] - torso[23] - torso[24]) / 2;
-                if (m.WorldBody.Length != 33)
-                    up.Z = 0;
-                Aim(Bone("上半身", "spine"), Bone("首", "neck", "上半身2"), up);
-            }
-            foreach (bool left in new[] { true, false })
-            {
-                string s = left ? "左" : "右",
-                    e = left ? "left" : "right";
-                int k = left ? 0 : 1;
-                int arm = Bone(s + "腕", e + "arm", e + "upperarm"),
-                    elbow = Bone(s + "ひじ", s + "肘", e + "elbow", e + "lowerarm"),
-                    wrist = Bone(s + "手首", e + "wrist", e + "hand");
-                Pair(11 + k, 13 + k, arm, elbow);
-                Pair(13 + k, 15 + k, elbow, wrist);
-                if (full)
-                {
-                    int leg = Bone(s + "足", e + "leg", e + "upperleg"),
-                        knee = Bone(s + "ひざ", s + "膝", e + "knee", e + "lowerleg"),
-                        ankle = Bone(s + "足首", e + "ankle", e + "foot");
-                    Pair(23 + k, 25 + k, leg, knee);
-                    Pair(25 + k, 27 + k, knee, ankle);
-                    Pair(29 + k, 31 + k, ankle, Bone(s + "つま先", e + "toe"));
-                }
-            }
-        }
-        var want = new float[Weights.Length];
-        float E(int i) =>
-            m.Expressions.Length == 52
-                ? Math.Clamp(
-                    (m.Expressions[i] - (neutral.Length == 52 ? neutral[i] : 0)) * 1.18f,
-                    0,
-                    1
-                )
-                : 0;
-        void Morph(float amount, params string[] names)
-        {
-            int i = Lookup(morphs, names);
-            if (i >= 0)
-                want[i] = Math.Max(want[i], amount);
-        }
-        int head = Bone("頭", "head");
-        Quaternion? headInCamera = null;
-        if (m.Face.Length == 478)
-        {
-            var f = m.Face;
-            var eyes = f[263] - f[33];
-            var vertical = f[152] - f[10];
-            var yaw = MathF.Atan2(eyes.Z, Math.Max(1, Math.Abs(eyes.X)));
-            var pitch = -MathF.Atan2(vertical.Z, Math.Max(1, Math.Abs(vertical.Y)));
-            var roll = MathF.Atan2(eyes.Y, eyes.X);
-            headInCamera = Quaternion.CreateFromYawPitchRoll(yaw, pitch, roll);
-            trace?.Mark(head);
-            float blinkL = E(9),
-                blinkR = E(10);
-            if (Lookup(morphs, LeftBlink) >= 0 && Lookup(morphs, RightBlink) >= 0)
-            {
-                Morph(blinkL, LeftBlink);
-                Morph(blinkR, RightBlink);
-            }
-            else
-                Morph(Math.Max(blinkL, blinkR), "まばたき", "瞬き", "blink", "eyesclosed");
-            Morph(E(25), "あ", "a", "jawopen");
-            Morph(E(44) * .55f + E(45) * .45f, "い", "i");
-            Morph(E(38), "う", "u", "pucker");
-            Morph(E(32), "お", "o", "funnel");
-            Morph((E(44) + E(45)) * .3f, "え", "e");
-            Morph((E(44) + E(45)) * .5f, "にやり", "口角上げ", "smile");
-            Morph(E(3), "上", "browup");
-            Morph((E(1) + E(2)) * .5f, "怒り", "browdown");
-            void Eye(int i, int inner, int outer, int top, int bottom, string jp, string en)
-            {
-                var center = (f[inner] + f[outer]) / 2;
-                float w = Math.Max(2, Math.Abs(f[inner].X - f[outer].X));
-                float h = Math.Max(w * .23f, Math.Abs(f[top].Y - f[bottom].Y));
-                float x = Math.Clamp((f[i].X - center.X) / w, -.25f, .25f),
-                    y = Math.Clamp((f[i].Y - (f[top].Y + f[bottom].Y) / 2) / h, -.4f, .4f);
-                Rotate(Bone(jp, en), Quaternion.CreateFromYawPitchRoll(x * 1.8f, -y * .6f, 0));
-            }
-            Eye(473, 362, 263, 386, 374, "左目", "lefteye");
-            Eye(468, 133, 33, 159, 145, "右目", "righteye");
-        }
-        foreach (var h in m.Hands)
-        {
-            string s = h.Left ? "左" : "右",
-                e = h.Left ? "left" : "right";
-            var p = h.Points;
-            string[] jp = ["親指", "人指", "中指", "薬指", "小指"];
-            string[] en = ["thumb", "index", "middle", "ring", "little"];
-            int Digit(int digit, int segment)
-            {
-                int n = segment + (digit == 0 ? 0 : 1);
-                string suffix = n.ToString();
-                return Bone(
-                    s + jp[digit] + suffix,
-                    s + (digit == 1 ? "人差指" : jp[digit]) + suffix,
-                    e + en[digit] + (segment + 1),
-                    s + jp[digit] + (segment == 0 ? "根" : "先")
-                );
-            }
-            int wrist = Bone(s + "手首", e + "wrist", e + "hand"),
-                middle = Digit(2, 0),
-                index = Digit(1, 0),
-                little = Digit(4, 0);
-            if (
-                wrist >= 0
-                && middle >= 0
-                && index >= 0
-                && little >= 0
-                && m.Sees(p[0])
-                && m.Sees(p[9])
-                && m.Sees(p[5])
-                && m.Sees(p[17])
-                && (p[9] - p[0]).LengthSquared() > .001f
-            )
-            {
-                orientations[wrist] = PalmRotation(
-                    Model.Bones[middle].Position - Model.Bones[wrist].Position,
-                    Model.Bones[index].Position - Model.Bones[little].Position,
-                    ToModel(p[9] - p[0]),
-                    ToModel(p[5] - p[17])
-                );
-                trace?.Mark(wrist, middle);
-            }
-            else if (m.Sees(p[0]) && m.Sees(p[9]))
-                Aim(wrist, middle, p[9] - p[0]);
-            for (int finger = 0; finger < 5; finger++)
-            for (int part = 0; part < 3; part++)
-            {
-                int joint = Digit(finger, part),
-                    next = part < 2 ? Digit(finger, part + 1) : -1;
-                if (joint < 0)
-                    continue;
-                int k = 1 + 4 * finger + part;
-                if (!m.Sees(p[k]) || !m.Sees(p[k + 1]))
-                    continue;
-                var direction = p[k + 1] - p[k];
-                if (next >= 0)
-                    Aim(joint, next, direction);
-                else
-                {
-                    int prev = Digit(finger, Math.Max(0, part - 1));
-                    if (prev >= 0 && prev != joint)
-                    {
-                        var tail = Model.Bones[joint].Position - Model.Bones[prev].Position;
-                        absolute[joint] = (tail, ToModel(direction));
-                        trace?.Mark(joint, offset: tail);
-                    }
-                }
-            }
-        }
+    }
+
+    // Ease morph weights, expand group morphs and apply bone morphs to the targets.
+    void BlendMorphs(float smoothing, bool faceSeen, RigTrace? trace)
+    {
         for (int i = 0; i < want.Length; i++)
             Weights[i] += (want[i] - Weights[i]) * smoothing;
-        var effective = (float[])Weights.Clone();
+        Array.Copy(Weights, effective, Weights.Length);
         for (int i = 0; i < Model.Morphs.Count; i++)
             if (Model.Morphs[i].SubMorphs is { } items)
                 foreach (var sub in items)
                     if ((uint)sub.GroupIndex < (uint)effective.Length)
                         effective[sub.GroupIndex] += Weights[i] * sub.Rate;
-        var translation = new Vector3[targets.Length];
         for (int i = 0; i < Model.Morphs.Count; i++)
             if (effective[i] > .0001f && Model.Morphs[i].MorphBones is { } offsets)
                 foreach (var x in offsets)
                     if ((uint)x.BoneIndex < (uint)targets.Length)
                     {
-                        if (m.Face.Length == 478)
+                        if (faceSeen)
                             trace?.Mark(x.BoneIndex);
                         translation[x.BoneIndex] += x.Translation * effective[i];
                         targets[x.BoneIndex] *= Quaternion.Slerp(
@@ -398,182 +302,110 @@ internal sealed partial class AvatarRig
                             effective[i]
                         );
                     }
-        if (full && m.Body.Length == 33)
-        {
-            int l = Bone("左腕", "leftarm", "leftupperarm"),
-                r = Bone("右腕", "rightarm", "rightupperarm"),
-                center = Bone("センター", "center", "下半身", "hips");
-            float height = Max.Y - Min.Y;
-            float shoulders =
-                l >= 0 && r >= 0
-                    ? Vector3.Distance(Model.Bones[l].Position, Model.Bones[r].Position)
-                    : height * .22f;
-            var delta = grounding.Observe(m, shoulders, height);
-            if (center >= 0)
-            {
-                translation[center] += delta;
-                if (m.Sees(23) && m.Sees(24))
-                    trace?.Mark(center);
-            }
-        }
-        else
-            grounding.Reset();
-        void Compose(int i)
-        {
-            var bone = Model.Bones[i];
-            int parent = bone.ParentIndex;
-            var parentRotation = parent < 0 ? Quaternion.Identity : global[parent];
-            global[i] = Quaternion.Normalize(parentRotation * rotations[i]);
-            positions[i] =
-                parent < 0
-                    ? bone.Position + translation[i]
-                    : positions[parent]
-                        + Vector3.Transform(
-                            bone.Position - Model.Bones[parent].Position + translation[i],
-                            parentRotation
-                        );
-            Skin[i] =
-                Matrix4x4.CreateTranslation(-bone.Position)
-                * Matrix4x4.CreateFromQuaternion(global[i])
-                * Matrix4x4.CreateTranslation(positions[i]);
-        }
-        void Solve(int i)
-        {
-            var b = Model.Bones[i];
-            int parent = b.ParentIndex;
-            var parentQ = parent < 0 ? Quaternion.Identity : global[parent];
-            var target = targets[i];
-            // The face mesh already measures the head in the camera frame, including torso motion.
-            if (i == head && headInCamera is { } orientation)
-                target = Quaternion.Inverse(parentQ) * orientation * target;
-            if (orientations.TryGetValue(i, out var worldOrientation))
-                target = Quaternion.Inverse(parentQ) * worldOrientation * target;
-            if (absolute.TryGetValue(i, out var aim))
-                target =
-                    stepSeconds > 0 && upperLimb[i]
-                        // One measured ray specifies a swing, not axial twist. Transport the previous
-                        // orientation so a forearm pointing back along its rest axis cannot spin.
-                        ? Quaternion.Inverse(parentQ)
-                            * FromTo(Vector3.Transform(aim.rest, global[i]), aim.target)
-                            * global[i]
-                        : FromTo(
-                            aim.rest,
-                            Vector3.Transform(aim.target, Quaternion.Inverse(parentQ))
-                        );
-            if (
-                (b.Flags & PMX_BoneFlag.AcquireRotate) != 0
-                && (uint)b.AppendBoneIndex < (uint)rotations.Length
-                && b.AppendBoneIndex != i
-            )
-                target = Quaternion.Normalize(
-                    target
-                        * Quaternion.Slerp(
-                            Quaternion.Identity,
-                            rotations[b.AppendBoneIndex],
-                            Math.Clamp(b.AppendBoneRatio, -1, 1)
-                        )
-                );
-            bool measured =
-                (upperLimb[i] && absolute.ContainsKey(i)) || orientations.ContainsKey(i);
-            // Work in camera coordinates for a measured limb. Its parent's turn must not add a
-            // second rotation to the wrist's own turn allowance during reacquisition.
-            var from =
-                stepSeconds > 0 && measured
-                    ? Quaternion.Normalize(Quaternion.Inverse(parentQ) * global[i])
-                    : rotations[i];
-            float amount = measured ? Response(from, target, smoothing) : smoothing;
-            if (
-                (upperLimb[i] || i == spine || (i == head && headInCamera == null))
-                && !measured
-                && Math.Abs(target.W) > .99999f
-            )
-                amount = 1 - MathF.Pow(1 - smoothing, .12f);
-            if (stepSeconds > 0 && (measured || i == head))
-            {
-                float angle =
-                    2 * MathF.Acos(Math.Clamp(Math.Abs(Quaternion.Dot(from, target)), 0, 1));
-                float maxTurn =
-                    (orientations.ContainsKey(i) && upperLimb[i] ? 660 : 540)
-                    * (MathF.PI / 180)
-                    * stepSeconds;
-                if (angle > .0001f)
-                    amount = Math.Min(amount, maxTurn / angle);
-            }
-            rotations[i] = Quaternion.Normalize(Quaternion.Slerp(from, target, amount));
-            Compose(i);
-        }
-        foreach (int i in shoulderParents)
-            Solve(i);
-        PlaceArms(m, translation, absolute, trace, stepSeconds);
-        foreach (int i in remainingBones)
-            Solve(i);
-        if (full && m.Body.Length == 33)
-        {
-            foreach (bool left in new[] { true, false })
-            {
-                string side = left ? "左" : "右",
-                    en = left ? "left" : "right";
-                int hip = Bone(side + "足", en + "leg", en + "upperleg"),
-                    knee = Bone(side + "ひざ", side + "膝", en + "knee", en + "lowerleg"),
-                    ankle = Bone(side + "足首", en + "ankle", en + "foot");
-                if (
-                    hip < 0
-                    || knee < 0
-                    || ankle < 0
-                    || !m.Sees(left ? 23 : 24)
-                    || !m.Sees(left ? 25 : 26)
-                    || !m.Sees(left ? 27 : 28)
-                    || !grounding.Plant(left, positions[ankle], out var target)
-                )
-                    continue;
-                if (Vector3.DistanceSquared(positions[ankle], target) < .00001f)
-                    continue;
-                var axis = target - positions[hip];
-                float length = axis.Length();
-                if (length < .001f)
-                    continue;
-                axis /= length;
-                float upper = Vector3.Distance(positions[knee], positions[hip]),
-                    lower = Vector3.Distance(positions[ankle], positions[knee]);
-                if (upper < .001f || lower < .001f)
-                    continue;
-                float span = Math.Clamp(
-                    length,
-                    Math.Abs(upper - lower) + .0001f,
-                    upper + lower - .0001f
-                );
-                float along = (upper * upper - lower * lower + span * span) / (2 * span);
-                var bend = positions[knee] - positions[hip];
-                bend -= Vector3.Dot(bend, axis) * axis;
-                if (bend.LengthSquared() < .00001f)
-                    bend = -Vector3.UnitZ + axis * axis.Z;
-                if (bend.LengthSquared() < .00001f)
-                    continue;
-                var kneeTarget =
-                    positions[hip]
-                    + axis * along
-                    + Vector3.Normalize(bend)
-                        * MathF.Sqrt(Math.Max(0, upper * upper - along * along));
-                void Correct(int joint, int end, Vector3 direction)
-                {
-                    int parent = Model.Bones[joint].ParentIndex;
-                    var pq = parent >= 0 ? global[parent] : Quaternion.Identity;
-                    trace?.Mark(joint, end);
-                    rotations[joint] = FromTo(
-                        Model.Bones[end].Position - Model.Bones[joint].Position,
-                        Vector3.Transform(direction, Quaternion.Inverse(pq))
-                    );
-                    foreach (int i in order)
-                        Compose(i);
-                }
-                Correct(hip, knee, kneeTarget - positions[hip]);
-                Correct(knee, ankle, target - positions[knee]);
-            }
-        }
-        EffectiveWeights = effective;
     }
 
-    public float[] EffectiveWeights { get; private set; } = [];
+    void Compose(int i)
+    {
+        var bone = Model.Bones[i];
+        int parent = bone.ParentIndex;
+        var parentRotation = parent < 0 ? Quaternion.Identity : global[parent];
+        global[i] = Quaternion.Normalize(parentRotation * rotations[i]);
+        positions[i] =
+            parent < 0
+                ? bone.Position + translation[i]
+                : positions[parent]
+                    + Vector3.Transform(
+                        bone.Position - Model.Bones[parent].Position + translation[i],
+                        parentRotation
+                    );
+        Skin[i] =
+            Matrix4x4.CreateTranslation(-bone.Position)
+            * Matrix4x4.CreateFromQuaternion(global[i])
+            * Matrix4x4.CreateTranslation(positions[i]);
+    }
+
+    // Shoulder parents first so PlaceArms sees the posed torso, then everything else.
+    void SolveHierarchy(
+        Motion m,
+        float smoothing,
+        float stepSeconds,
+        Quaternion? headInCamera,
+        RigTrace? trace
+    )
+    {
+        foreach (int i in shoulderParents)
+            Solve(i, smoothing, stepSeconds, headInCamera);
+        PlaceArms(m, translation, absolute, trace, stepSeconds);
+        foreach (int i in remainingBones)
+            Solve(i, smoothing, stepSeconds, headInCamera);
+    }
+
+    void Solve(int i, float smoothing, float stepSeconds, Quaternion? headInCamera)
+    {
+        var b = Model.Bones[i];
+        int parent = b.ParentIndex;
+        var parentQ = parent < 0 ? Quaternion.Identity : global[parent];
+        var target = targets[i];
+        int head = map.Head;
+        // The face mesh already measures the head in the camera frame, including torso motion.
+        if (i == head && headInCamera is { } orientation)
+            target = Quaternion.Inverse(parentQ) * orientation * target;
+        if (orientations.TryGetValue(i, out var worldOrientation))
+            target = Quaternion.Inverse(parentQ) * worldOrientation * target;
+        if (absolute.TryGetValue(i, out var aim))
+            target =
+                stepSeconds > 0 && upperLimb[i]
+                    // One measured ray specifies a swing, not axial twist. Transport the previous
+                    // orientation so a forearm pointing back along its rest axis cannot spin.
+                    ? Quaternion.Inverse(parentQ)
+                        * FromTo(Vector3.Transform(aim.rest, global[i]), aim.target)
+                        * global[i]
+                    : FromTo(aim.rest, Vector3.Transform(aim.target, Quaternion.Inverse(parentQ)));
+        if (
+            (b.Flags & PMX_BoneFlag.AcquireRotate) != 0
+            && (uint)b.AppendBoneIndex < (uint)rotations.Length
+            && b.AppendBoneIndex != i
+        )
+            target = Quaternion.Normalize(
+                target
+                    * Quaternion.Slerp(
+                        Quaternion.Identity,
+                        rotations[b.AppendBoneIndex],
+                        Math.Clamp(b.AppendBoneRatio, -1, 1)
+                    )
+            );
+        bool measured = (upperLimb[i] && absolute.ContainsKey(i)) || orientations.ContainsKey(i);
+        // Work in camera coordinates for a measured limb. Its parent's turn must not add a
+        // second rotation to the wrist's own turn allowance during reacquisition.
+        var from =
+            stepSeconds > 0 && measured
+                ? Quaternion.Normalize(Quaternion.Inverse(parentQ) * global[i])
+                : rotations[i];
+        float amount = measured ? Response(from, target, smoothing) : smoothing;
+        // An unobserved limb, spine or head drifts back to rest slowly instead of snapping.
+        if (
+            (upperLimb[i] || i == map.Spine || (i == head && headInCamera == null))
+            && !measured
+            && Math.Abs(target.W) > .99999f
+        )
+            amount = 1 - MathF.Pow(1 - smoothing, .12f);
+        if (stepSeconds > 0 && (measured || i == head))
+        {
+            float angle = 2 * MathF.Acos(Math.Clamp(Math.Abs(Quaternion.Dot(from, target)), 0, 1));
+            float maxTurn =
+                (
+                    orientations.ContainsKey(i) && upperLimb[i]
+                        ? MaxWristTurnDegreesPerSecond
+                        : MaxTurnDegreesPerSecond
+                )
+                * (MathF.PI / 180)
+                * stepSeconds;
+            if (angle > .0001f)
+                amount = Math.Min(amount, maxTurn / angle);
+        }
+        rotations[i] = Quaternion.Normalize(Quaternion.Slerp(from, target, amount));
+        Compose(i);
+    }
 
     static Vector3 ToModel(Vector3 p) => new(-p.X, -p.Y, p.Z);
 
