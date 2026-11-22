@@ -84,7 +84,13 @@ internal static class Jitter
                         travel[j] += step;
                         // 8° in one 60 Hz frame is 480°/s: a snap, or a very fast gesture.
                         if (step > 8)
+                        {
                             jumps[j]++;
+                            if (Environment.GetEnvironmentVariable("JITTER_LIST") == "1")
+                                Console.WriteLine(
+                                    $"sample {sample,4} {Joints[j]} {step,5:0.0} deg  hands L={motion.Hands.Any(h => h.Left)} R={motion.Hands.Any(h => !h.Left)}  vis el {motion.Visibility.ElementAtOrDefault(13):0.00}/{motion.Visibility.ElementAtOrDefault(14):0.00} wr {motion.Visibility.ElementAtOrDefault(15):0.00}/{motion.Visibility.ElementAtOrDefault(16):0.00}"
+                                );
+                        }
                         var delta = current[j] * Quaternion.Inverse(previous[j]);
                         if (delta.W < 0)
                             delta = -delta;

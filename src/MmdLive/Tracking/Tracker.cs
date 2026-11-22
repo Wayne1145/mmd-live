@@ -53,6 +53,9 @@ internal sealed class Tracker : IDisposable
     // every few frames to find a new performer.
     const int PersonRescanInterval = 8;
 
+    // How far outside the frame a hand's wrist may be, in palm lengths, when its palm is visible.
+    const float WristOutside = .6f;
+
     readonly List<GpuModel> models = [];
     readonly GpuModel faceDetector,
         mesh,
@@ -64,6 +67,9 @@ internal sealed class Tracker : IDisposable
     readonly int[] subset;
     Crop? faceRegion,
         bodyRegion;
+
+    // Diagnostics: the crop the pose model saw on the last frame.
+    internal Crop? LastBodyCrop { get; private set; }
     int frames;
 
     public Tracker(string directory, int adapter)
@@ -163,6 +169,7 @@ internal sealed class Tracker : IDisposable
         }
         if (bodyRegion is not Crop c || c.Side < 8)
             return ([], [], []);
+        LastBodyCrop = c;
         var raw = pose.Image(image, c, false, "Identity", "Identity_1", "Identity_4");
         if (raw[1][0] < .5f)
         {
@@ -267,15 +274,29 @@ internal sealed class Tracker : IDisposable
                 return null;
             var points = Project(raw[0], region, hand.Size, 3, HandLandmark.Count);
             bool InFrame(int i) => Motion.Inside(points[i], image.Width, image.Height);
-            if (
-                !InFrame(HandLandmark.Wrist)
-                || !(
-                    InFrame(HandLandmark.IndexBase)
-                    || InFrame(HandLandmark.MiddleBase)
-                    || InFrame(HandLandmark.RingBase)
-                    || InFrame(HandLandmark.LittleBase)
-                )
-            )
+            int basesInFrame =
+                (InFrame(HandLandmark.IndexBase) ? 1 : 0)
+                + (InFrame(HandLandmark.MiddleBase) ? 1 : 0)
+                + (InFrame(HandLandmark.RingBase) ? 1 : 0)
+                + (InFrame(HandLandmark.LittleBase) ? 1 : 0);
+            // A raised hand at a seated desk often has its wrist just below the frame. Keep the
+            // hand when its palm is in view and the wrist is only slightly outside; rejecting
+            // it made the arm drop and swing back while the hand was plainly visible.
+            float palm = Vector2.Distance(
+                XY(points[HandLandmark.Wrist]),
+                XY(points[HandLandmark.MiddleBase])
+            );
+            var wrist = points[HandLandmark.Wrist];
+            bool wristNear =
+                InFrame(HandLandmark.Wrist)
+                || (
+                    basesInFrame >= 3
+                    && wrist.X >= -palm * WristOutside
+                    && wrist.X < image.Width + palm * WristOutside
+                    && wrist.Y >= -palm * WristOutside
+                    && wrist.Y < image.Height + palm * WristOutside
+                );
+            if (!wristNear || basesInFrame == 0)
                 return null;
             float separation = Math.Max(6, Vector2.Distance(XY(points[0]), XY(points[9])) * .30f);
             if (

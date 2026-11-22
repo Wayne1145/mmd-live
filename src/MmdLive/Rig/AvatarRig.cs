@@ -38,6 +38,7 @@ internal sealed partial class AvatarRig
         effective;
     readonly Dictionary<int, Quaternion> orientations = [];
     readonly Dictionary<int, (Vector3 rest, Vector3 target)> absolute = [];
+    bool performerSeen;
 
     public void ResetPoseOrigin() => ResetLiveTracking();
 
@@ -195,6 +196,8 @@ internal sealed partial class AvatarRig
         Array.Clear(want);
         orientations.Clear();
         absolute.Clear();
+        // With nobody in view the avatar returns to its bind pose, as before tracking starts.
+        performerSeen = m.Body.Length > 0 || m.Face.Length > 0;
 
         AimBody(m, full, trace);
         var headInCamera = SolveFace(m, trace);
@@ -361,6 +364,14 @@ internal sealed partial class AvatarRig
                         * FromTo(Vector3.Transform(aim.rest, global[i]), aim.target)
                         * global[i]
                     : FromTo(aim.rest, Vector3.Transform(aim.target, Quaternion.Inverse(parentQ)));
+        // An arm with no measurement this frame eases into a relaxed pose, not the bind pose.
+        bool idle =
+            performerSeen
+            && !absolute.ContainsKey(i)
+            && !orientations.ContainsKey(i)
+            && idlePose.TryGetValue(i, out var relaxed);
+        if (idle)
+            target = idlePose[i] * target;
         if (
             (b.Flags & PMX_BoneFlag.AcquireRotate) != 0
             && (uint)b.AppendBoneIndex < (uint)rotations.Length
@@ -386,7 +397,7 @@ internal sealed partial class AvatarRig
         if (
             (upperLimb[i] || i == map.Spine || (i == head && headInCamera == null))
             && !measured
-            && Math.Abs(target.W) > .99999f
+            && (idle || Math.Abs(target.W) > .99999f)
         )
             amount = 1 - MathF.Pow(1 - smoothing, .12f);
         if (stepSeconds > 0 && (measured || i == head))

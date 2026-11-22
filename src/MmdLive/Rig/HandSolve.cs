@@ -19,12 +19,15 @@ internal sealed partial class AvatarRig
                 little = b.Finger(Digit.Little, 0);
             var palmWrist = p[HandLandmark.Wrist];
             var palmMiddle = p[HandLandmark.MiddleBase];
+            // The tracker keeps a hand whose wrist is just below the frame when its palm is in
+            // view. Its extrapolated wrist still orients the palm.
+            bool wristSeen = m.Sees(palmWrist) || (h.Points.Length == HandLandmark.Count && float.IsFinite(palmWrist.X) && float.IsFinite(palmWrist.Y));
             if (
                 wrist >= 0
                 && middle >= 0
                 && index >= 0
                 && little >= 0
-                && m.Sees(palmWrist)
+                && wristSeen
                 && m.Sees(palmMiddle)
                 && m.Sees(p[HandLandmark.IndexBase])
                 && m.Sees(p[HandLandmark.LittleBase])
@@ -39,7 +42,7 @@ internal sealed partial class AvatarRig
                 );
                 trace?.Mark(wrist, middle);
             }
-            else if (m.Sees(palmWrist) && m.Sees(palmMiddle))
+            else if (wristSeen && m.Sees(palmMiddle))
                 Aim(wrist, middle, palmMiddle - palmWrist, trace);
             for (int finger = 0; finger < 5; finger++)
             for (int part = 0; part < 3; part++)

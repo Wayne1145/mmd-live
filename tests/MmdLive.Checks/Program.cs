@@ -36,6 +36,29 @@ internal static class Check
                     Array.IndexOf(args, "--frames") is >= 0 and var f ? args[f + 1] : null
                 );
                 break;
+            case "posecrop":
+                using (var video = new VideoCapture(args[1], VideoCaptureAPIs.FFMPEG))
+                using (var tracker = new MmdLive.Tracking.Tracker(Program.Models, GraphicsAdapter.List().First().Index))
+                using (var image = new Mat())
+                {
+                    var wanted = args[2].Split(',').Select(int.Parse).ToHashSet();
+                    for (int n = 0; video.Read(image) && !image.Empty(); n++)
+                    {
+                        var m = tracker.Track(image);
+                        if (!wanted.Contains(n) || tracker.LastBodyCrop is not { } c)
+                            continue;
+                        Console.WriteLine($"frame {n}: crop center ({c.Center.X:0},{c.Center.Y:0}) side {c.Side:0} angle {c.Angle * 180 / MathF.PI:0.0}");
+                        var corners = new[] { new System.Numerics.Vector2(0, 0), new(1, 0), new(1, 1), new(0, 1) }
+                            .Select(uv => c.Pixel(uv)).Select(p => new OpenCvSharp.Point((int)p.X, (int)p.Y)).ToArray();
+                        using var copy = image.Clone();
+                        Cv2.Polylines(copy, [corners], true, new Scalar(0, 0, 255), 6);
+                        if (m.Body.Length == 33)
+                            foreach (int k in new[] { 0, 7, 8, 11, 12, 13, 14, 15, 16 })
+                                Cv2.Circle(copy, new OpenCvSharp.Point((int)m.Body[k].X, (int)m.Body[k].Y), 14, new Scalar(255, 255, 0), -1);
+                        Cv2.ImWrite(Path.Combine(args[3], $"crop-{n:D3}.jpg"), copy);
+                    }
+                }
+                break;
             case "bench":
                 using (var frame = Cv2.ImRead(args[1]))
                     foreach (var file in Directory.GetFiles(Program.Models, "*.onnx").Order())

@@ -51,6 +51,15 @@ internal sealed class MotionFilter
     // Visibility on a blurred arm hovers around the threshold and would toggle the limb every frame.
     const float HoldScore = .3f;
 
+    // BlazePose still reports elbows and wrists that are below the frame, often with high
+    // visibility, as guesses pinned near the bottom edge. Driving the arms from those guesses
+    // threw a seated performer's arms sideways. A pose landmark must first appear this far
+    // inside the frame (fractions of the image height) and is dropped once it leaves the frame.
+    // A detected hand still drives its arm from the hand landmarks.
+    const float EnterMarginBottom = .12f;
+    const float EnterMarginSide = .05f;
+    const float StayMargin = .015f;
+
     sealed class PointSet
     {
         OneEuro[] x = [],
@@ -129,7 +138,7 @@ internal sealed class MotionFilter
     {
         dt = Math.Clamp(dt, 1f / 240, .25f);
         float unit = Math.Max(1, raw.Height);
-        var visibility = Hold(raw.Visibility);
+        var visibility = Gate(raw);
         var filteredHands = new List<Hand>(2);
         bool[] present = new bool[2];
         foreach (var h in raw.Hands)
@@ -164,24 +173,34 @@ internal sealed class MotionFilter
         };
     }
 
-    float[] Hold(float[] raw)
+    // Decides per pose landmark whether the solver may treat it as seen, with hysteresis on both
+    // the visibility score and the distance from the frame edge. Unseen landmarks report 0.
+    float[] Gate(Motion raw)
     {
-        if (raw.Length == 0)
+        var score = raw.Visibility;
+        if (score.Length == 0 || raw.Body.Length != score.Length)
         {
             held = [];
-            return raw;
+            return score;
         }
-        if (held.Length != raw.Length)
-            held = new float[raw.Length];
-        var result = (float[])raw.Clone();
-        for (int i = 0; i < raw.Length; i++)
+        if (held.Length != score.Length)
+            held = new float[score.Length];
+        float h = raw.Height;
+        float Inset(Vector3 p) => Math.Min(Math.Min(p.X, raw.Width - p.X), Math.Min(p.Y, h - p.Y));
+        var result = new float[score.Length];
+        for (int i = 0; i < score.Length; i++)
         {
-            bool seen =
-                raw[i] >= Motion.VisibleScore
-                || (held[i] >= Motion.VisibleScore && raw[i] >= HoldScore);
-            if (seen && raw[i] < Motion.VisibleScore)
-                result[i] = Motion.VisibleScore;
-            held[i] = seen ? Math.Max(raw[i], Motion.VisibleScore) : raw[i];
+            var p = raw.Body[i];
+            bool wasSeen = held[i] >= Motion.VisibleScore;
+            bool enters =
+                score[i] >= Motion.VisibleScore
+                && Math.Min(p.X, raw.Width - p.X) >= EnterMarginSide * h
+                && p.Y >= EnterMarginSide * h
+                && h - p.Y >= EnterMarginBottom * h;
+            bool stays = wasSeen && score[i] >= HoldScore && Inset(p) >= StayMargin * h;
+            bool seen = float.IsFinite(p.X) && float.IsFinite(p.Y) && (enters || stays);
+            result[i] = seen ? Math.Max(score[i], Motion.VisibleScore) : 0;
+            held[i] = result[i];
         }
         return result;
     }
