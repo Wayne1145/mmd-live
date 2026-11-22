@@ -127,7 +127,7 @@ internal sealed class TrackingPreview : Control
         {
             Label(
                 g,
-                "等待摄像头、图片或视频输入",
+                "在左侧选择输入源，然后点击「开始」",
                 ClientRectangle,
                 ForeColor,
                 TextFlags | TextFormatFlags.HorizontalCenter

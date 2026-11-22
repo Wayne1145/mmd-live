@@ -115,9 +115,19 @@ internal sealed class MotionFilter
         world = new(),
         face = new();
     readonly PointSet[] hands = [new(), new()];
-    // The hand detector drops a blurred hand for a frame or two and finds it again. Holding the
-    // last hand that long keeps the wrist and fingers from flicking to rest and back.
-    const int HandHoldSamples = 3;
+    // The hand detector drops a blurred hand or a fist for a few frames and finds it again.
+    // Holding the last hand that long keeps the arm and fingers from flicking to rest and back.
+    const int HandHoldSamples = 6;
+
+    // Pose arm landmarks for one side, as offsets from the performer's left-side index.
+    static readonly int[] ArmLandmarks =
+    [
+        PoseLandmark.LeftElbow,
+        PoseLandmark.LeftWrist,
+        PoseLandmark.LeftPinky,
+        PoseLandmark.LeftIndex,
+        PoseLandmark.LeftThumb,
+    ];
     readonly Hand?[] lastHand = new Hand?[2];
     readonly int[] missing = new int[2];
     float[] held = [];
@@ -134,14 +144,18 @@ internal sealed class MotionFilter
         held = [];
     }
 
-    public Motion Step(Motion raw, float dt)
+    // `armsNeedHands`: in half-body framing BlazePose confidently reports a resting arm's wrist
+    // on the chest (visibility above 0.9), which raised a phantom arm. The hand detector produced
+    // no false hands in the same recordings, so an arm only follows the pose while its hand is
+    // detected or briefly held. Full-body framing keeps pose-only arms: distant hands are small.
+    public Motion Step(Motion raw, float dt, bool armsNeedHands = false)
     {
         dt = Math.Clamp(dt, 1f / 240, .25f);
         float unit = Math.Max(1, raw.Height);
         var visibility = Gate(raw);
         var filteredHands = new List<Hand>(2);
         bool[] present = new bool[2];
-        foreach (var h in raw.Hands)
+        foreach (var h in ConsistentSides(raw.Hands))
         {
             int side = h.Left ? 0 : 1;
             present[side] = true;
@@ -163,6 +177,20 @@ internal sealed class MotionFilter
                 lastHand[side] = null;
             }
         }
+        // Gate returns its own array (and sizes `held`) whenever there is a full pose.
+        if (
+            armsNeedHands
+            && visibility.Length == PoseLandmark.Count
+            && held.Length == PoseLandmark.Count
+        )
+            for (int side = 0; side < 2; side++)
+                if (!filteredHands.Any(h => h.Left == (side == 0)))
+                    foreach (int landmark in ArmLandmarks)
+                    {
+                        visibility[landmark + side] = 0;
+                        // Re-entering must pass the full threshold again.
+                        held[landmark + side] = 0;
+                    }
         return raw with
         {
             Body = body.Step(raw.Body, dt, unit, Body),
@@ -171,6 +199,44 @@ internal sealed class MotionFilter
             Hands = filteredHands.ToArray(),
             WorldBody = world.Step(raw.WorldBody, dt, 1, World),
         };
+    }
+
+    // The handedness model now and then labels the only visible hand as the other side for a
+    // frame. The arm that owned it then dropped while the opposite arm leapt across to it. A hand
+    // that appears where the other side's hand just was, while that hand is gone, keeps the
+    // other side's label; two labels on one spot are the same hand.
+    IEnumerable<Hand> ConsistentSides(Hand[] detected)
+    {
+        static Vector2 Wrist(Hand h) => new(h.Points[HandLandmark.Wrist].X, h.Points[HandLandmark.Wrist].Y);
+        static float Palm(Hand h) =>
+            Math.Max(
+                8,
+                Vector2.Distance(
+                    Wrist(h),
+                    new(h.Points[HandLandmark.MiddleBase].X, h.Points[HandLandmark.MiddleBase].Y)
+                )
+            );
+        var hands = detected.Where(h => h.Points.Length == HandLandmark.Count).ToList();
+        if (hands.Count == 2 && Vector2.Distance(Wrist(hands[0]), Wrist(hands[1])) < Palm(hands[0]))
+        {
+            // Keep the label that continues a hand from the previous sample, else the stronger.
+            float Continuity(Hand h) =>
+                lastHand[h.Left ? 0 : 1] is { } last
+                    ? Vector2.Distance(Wrist(last), Wrist(h)) / Palm(h)
+                    : float.PositiveInfinity;
+            hands = [hands.OrderBy(Continuity).ThenByDescending(h => h.Confidence).First()];
+        }
+        if (hands.Count == 1)
+        {
+            var h = hands[0];
+            int side = h.Left ? 0 : 1,
+                other = 1 - side;
+            float Gap(Hand? last) =>
+                last is null ? float.PositiveInfinity : Vector2.Distance(Wrist(last), Wrist(h));
+            if (Gap(lastHand[other]) < Palm(h) * 1.5f && Gap(lastHand[other]) < Gap(lastHand[side]))
+                hands[0] = h with { Left = other == 0 };
+        }
+        return hands;
     }
 
     // Decides per pose landmark whether the solver may treat it as seen, with hysteresis on both

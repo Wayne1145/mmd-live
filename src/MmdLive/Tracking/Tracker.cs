@@ -53,6 +53,17 @@ internal sealed class Tracker : IDisposable
     // every few frames to find a new performer.
     const int PersonRescanInterval = 8;
 
+    // The person detector aligns its crop from the hips to a point above the head. With the hips
+    // out of frame that axis is a guess and tilted the crop 25-40 degrees for an upright seated
+    // performer, which skewed every pose landmark. A body seen by a webcam is close to upright.
+    const float MaxBodyTilt = 15 * MathF.PI / 180;
+
+    static float UprightBody(float angle)
+    {
+        angle = MathF.IEEERemainder(angle, 2 * MathF.PI);
+        return Math.Clamp(angle, -MaxBodyTilt, MaxBodyTilt);
+    }
+
     // How far outside the frame a hand's wrist may be, in palm lengths, when its palm is visible.
     const float WristOutside = .6f;
 
@@ -135,7 +146,11 @@ internal sealed class Tracker : IDisposable
             float length = vertical.Length();
             if (length > 12)
             {
-                bodyRegion = new(chin + vertical * 2.05f, length * 6.9f, Crop.Upright(chin, crown));
+                bodyRegion = new(
+                    chin + vertical * 2.05f,
+                    length * 6.9f,
+                    UprightBody(Crop.Upright(chin, crown))
+                );
                 (body, visible, world) = GetBody(image, whole, false);
             }
         }
@@ -164,7 +179,7 @@ internal sealed class Tracker : IDisposable
                 bodyRegion = new(
                     d.Marks[0],
                     2 * Vector2.Distance(d.Marks[0], d.Marks[1]),
-                    Crop.Upright(d.Marks[0], d.Marks[1])
+                    UprightBody(Crop.Upright(d.Marks[0], d.Marks[1]))
                 );
         }
         if (bodyRegion is not Crop c || c.Side < 8)

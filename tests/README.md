@@ -67,6 +67,8 @@
 ./scripts/dotnet.ps1 run --no-build -c Release --project tests/MmdLive.Checks -- jitter ./assets/studio/StudioPilot.pmx ./artifacts/video.ndjson --frames ./artifacts/frames
 ```
 
+设置环境变量 `JITTER_LIST=1` 时，`jitter` 会逐条列出每次跳变的样本号、关节、当时两只手是否被识别以及手肘和手腕的可见度。`posecrop <视频> <帧号列表> <目录>` 把姿态模型实际看到的裁剪框和头、肩、肘、腕关键点画在指定帧上，用于排查关键点整体偏移。
+
 ## OBS 游戏捕获验收
 
 用独立的 OBS 便携配置准备一个名为 `MmdQA` 的场景，在其 WebSocket 服务中设置测试口令。在同一 Windows 会话中运行本软件并打开一张静态照片。以下脚本连接本机端口，通过 OBS 的窗口列表选取 `MMD Live — OBS Output`，生成黑底、白底和单独游戏源的截图。测试设置及 OBS 统计写入 `obs.json`。

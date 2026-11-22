@@ -69,7 +69,11 @@ internal sealed partial class AvatarRig
         if (empty || sample.Still)
             filtered = sample.Detected;
         else if (!repeat)
-            filtered = filter.Step(sample.Detected, initial ? 1f / 30 : sourceGap);
+            filtered = filter.Step(
+                sample.Detected,
+                initial ? 1f / 30 : sourceGap,
+                armsNeedHands: !full
+            );
         liveTrace.Targets.Clear();
         Apply(filtered, full, blend, liveTrace, snap ? 0 : dt);
         if (!empty)
