@@ -5,13 +5,20 @@ namespace MmdLive;
 
 internal sealed record CameraMode(int Width, int Height, double Fps)
 {
+    // Motion smoothness depends on the sample rate more than on pixels. Choose a 30 fps mode
+    // of at least 720p first, then the size closest to 1440p. A 10 fps 1440p mode loses to 1080p30.
     internal static CameraMode? Prefer(IEnumerable<CameraMode> modes) =>
         modes
             .Where(m => m.Width > 0 && m.Height > 0 && m.Fps > 0)
             .OrderBy(m =>
+                m.Height < 720 ? 3
+                : m.Fps >= 29 ? 0
+                : m.Fps >= 20 ? 1
+                : 2
+            )
+            .ThenBy(m =>
                 Math.Abs(Math.Log(m.Width / 2560.0)) + Math.Abs(Math.Log(m.Height / 1440.0))
             )
-            .ThenBy(m => m.Fps < 29 ? 1 : 0)
             .ThenBy(m => Math.Abs(m.Fps - 30))
             .FirstOrDefault();
 }

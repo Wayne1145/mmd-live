@@ -130,10 +130,19 @@ internal static class RetargetChecks
             step > 1 && step <= 22.05f,
             "reacquisition must turn towards an observed wrist within the 30 Hz allowance"
         );
-        var skin = rig.Skin.ToArray();
         for (int i = 1; i <= 7; i++)
             rig.ApplySample(reacquired, false, stamp + tick * i / 8);
-        Check(skin.SequenceEqual(rig.Skin), "rendering a camera sample twice advances its pose");
+        float eased = Angle(before, Rotation());
+        // Render frames between samples continue towards the same observation, bounded by the
+        // 660°/s wrist allowance over the render time that actually passed.
+        Check(eased > step, "render frames between camera samples did not ease the pose");
+        Check(
+            eased <= step + 660f * 7 / 8 / 30 + .05f,
+            "re-rendering a sample banked extra rotation"
+        );
+        var skin = rig.Skin.ToArray();
+        rig.ApplySample(reacquired, false, stamp + tick * 7 / 8);
+        Check(skin.SequenceEqual(rig.Skin), "a render with no elapsed time advanced the pose");
         for (int i = 0; i < 18; i++)
             rig.ApplySample(Frame(turned), false, stamp);
         Check(

@@ -22,28 +22,33 @@ internal sealed partial class AvatarRig
     }
 
     // Stamps are acquisition times. Motion.Milliseconds measures inference cost, not elapsed motion.
+    // Every render frame steps the pose towards the latest sample. A 10-15 fps camera then
+    // eases between observations instead of holding still and jumping on each new frame.
     internal RigTrace ApplySample(InputSample sample, bool full, long now)
     {
         bool empty = sample.Stamp == 0;
         if (empty && (lastCapture == 0 || atRest))
             return liveTrace;
-        if (
-            !empty
-            && (sample.Stamp < lastCapture || (sample.Stamp == lastCapture && lastFull == full))
-        )
+        if (!empty && sample.Stamp < lastCapture)
+            return liveTrace;
+        bool repeat = !empty && sample.Stamp == lastCapture;
+        // A still image is solved once with a snap. Re-rendering it cannot change the pose.
+        if (repeat && sample.Still && lastFull == full)
             return liveTrace;
 
         bool initial = lastCapture == 0;
-        float elapsed =
-            initial || (!empty && sample.Stamp == lastCapture)
-                ? 1f / 30
-                : (float)
-                    (
-                        empty
-                            ? Stopwatch.GetElapsedTime(lastUpdate, now)
-                            : Stopwatch.GetElapsedTime(lastCapture, sample.Stamp)
-                    ).TotalSeconds;
-        if (empty || elapsed > .25f || full != lastFull)
+        // Time advanced since the previous solve, measured on the render clock.
+        float elapsed = initial
+            ? 1f / 30
+            : (float)Stopwatch.GetElapsedTime(lastUpdate, now).TotalSeconds;
+        if (repeat && lastFull == full && elapsed <= 0)
+            return liveTrace;
+        // A gap in the source itself, not the render cadence, invalidates the previous arm branch.
+        float sourceGap =
+            empty || repeat || initial
+                ? 0
+                : (float)Stopwatch.GetElapsedTime(lastCapture, sample.Stamp).TotalSeconds;
+        if (empty || sourceGap > .25f || full != lastFull)
             Array.Clear(lastArm);
         if (empty && lostSince == 0)
             lostSince = now;

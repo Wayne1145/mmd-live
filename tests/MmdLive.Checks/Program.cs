@@ -132,6 +132,15 @@ internal static class Check
             CameraMode.Prefer([new(1280, 720, 30), new(1920, 1080, 30)])?.Width == 1920,
             "camera mode fallback"
         );
+        Require(
+            CameraMode.Prefer([new(2560, 1440, 10), new(1920, 1080, 30)])
+                == new CameraMode(1920, 1080, 30),
+            "a slow 1440p mode must lose to 1080p at 30 fps"
+        );
+        Require(
+            CameraMode.Prefer([new(2560, 1440, 15), new(640, 480, 30)])?.Width == 2560,
+            "frame rate must not drop below 720p"
+        );
         var expression = new float[52];
         expression[9] = 1;
         expression[25] = .8f;
