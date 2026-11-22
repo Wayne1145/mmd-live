@@ -5,7 +5,12 @@ using OpenCvSharp;
 
 namespace MmdLive.Tracking;
 
-internal sealed record Hand(bool Left, float Confidence, Vector3[] Points);
+internal sealed record Hand(bool Left, float Confidence, Vector3[] Points)
+{
+    // Repeated from an earlier frame by MotionFilter after a brief detection dropout. It still
+    // drives the avatar but is not drawn as observed in the preview.
+    public bool Held { get; init; }
+}
 
 internal sealed record Motion(
     int Width,
@@ -21,10 +26,13 @@ internal sealed record Motion(
     // Hip-centered coordinates in meters, rotated back into camera axes.
     public Vector3[] WorldBody { get; init; } = [];
 
+    // A pose landmark counts as seen at this visibility and presence score.
+    internal const float VisibleScore = .55f;
+
     internal bool Sees(int index) =>
         index < Body.Length
         && index < Visibility.Length
-        && Visibility[index] >= .55f
+        && Visibility[index] >= VisibleScore
         && Inside(Body[index], Width, Height);
 
     internal bool Sees(Vector3 point) => Inside(point, Width, Height);
@@ -41,6 +49,13 @@ internal sealed record Motion(
 
 internal sealed class Tracker : IDisposable
 {
+    // The body is tracked from last frame's crop. The full-image person detector only runs
+    // every few frames to find a new performer.
+    const int PersonRescanInterval = 8;
+
+    // How far outside the frame a hand's wrist may be, in palm lengths, when its palm is visible.
+    const float WristOutside = .6f;
+
     readonly List<GpuModel> models = [];
     readonly GpuModel faceDetector,
         mesh,
@@ -52,6 +67,9 @@ internal sealed class Tracker : IDisposable
     readonly int[] subset;
     Crop? faceRegion,
         bodyRegion;
+
+    // Diagnostics: the crop the pose model saw on the last frame.
+    internal Crop? LastBodyCrop { get; private set; }
     int frames;
 
     public Tracker(string directory, int adapter)
@@ -82,6 +100,17 @@ internal sealed class Tracker : IDisposable
         }
     }
 
+    // Per-model call counts and time, for the observe diagnostic.
+    internal string Profile(int frames) =>
+        string.Join(
+            Environment.NewLine,
+            models.Select(m =>
+                $"{m.Name, -24} {m.Calls / (double)Math.Max(1, frames), 5:0.00} calls/frame  "
+                + $"prepare {m.PrepareMilliseconds / Math.Max(1, frames), 6:0.00} ms/frame  "
+                + $"infer {m.InferMilliseconds / Math.Max(1, frames), 6:0.00} ms/frame"
+            )
+        );
+
     public void Reset()
     {
         faceRegion = null;
@@ -95,13 +124,13 @@ internal sealed class Tracker : IDisposable
     {
         var clock = Stopwatch.StartNew();
         var whole = Crop.Whole(image);
-        bool refresh = frames++ % 8 == 0;
+        bool refresh = frames++ % PersonRescanInterval == 0;
         var (body, visible, world) = GetBody(image, whole, refresh);
         var (face, blend) = GetFace(image, whole, body, visible);
-        if (body.Length == 0 && face.Length == 478)
+        if (body.Length == 0 && face.Length == FaceLandmark.Count)
         {
-            var chin = XY(face[152]);
-            var crown = XY(face[10]);
+            var chin = XY(face[FaceLandmark.Chin]);
+            var crown = XY(face[FaceLandmark.Forehead]);
             var vertical = chin - crown;
             float length = vertical.Length();
             if (length > 12)
@@ -140,20 +169,21 @@ internal sealed class Tracker : IDisposable
         }
         if (bodyRegion is not Crop c || c.Side < 8)
             return ([], [], []);
+        LastBodyCrop = c;
         var raw = pose.Image(image, c, false, "Identity", "Identity_1", "Identity_4");
         if (raw[1][0] < .5f)
         {
             bodyRegion = null;
             return ([], [], []);
         }
-        var points = Project(raw[0], c, pose.Size, 5, 33);
-        var vis = new float[33];
-        for (int i = 0; i < 33; i++)
+        var points = Project(raw[0], c, pose.Size, 5, PoseLandmark.Count);
+        var vis = new float[PoseLandmark.Count];
+        for (int i = 0; i < PoseLandmark.Count; i++)
             vis[i] = Math.Min(
                 BlazeDetector.Sigmoid(raw[0][i * 5 + 3]),
                 BlazeDetector.Sigmoid(raw[0][i * 5 + 4])
             );
-        var world = new Vector3[33];
+        var world = new Vector3[PoseLandmark.Count];
         for (int i = 0; i < world.Length; i++)
         {
             int k = i * 3;
@@ -181,15 +211,15 @@ internal sealed class Tracker : IDisposable
 
         // At full-body distances the global 128px detector can mistake clothing for a face.
         // Validate each proposal with the mesh before it can displace the tracked performer.
-        if (body.Length == 33 && visible[0] > .4f)
+        if (body.Length == PoseLandmark.Count && visible[PoseLandmark.Nose] > .4f)
         {
             float headWidth = Math.Max(
-                Vector2.Distance(XY(body[7]), XY(body[8])),
-                2.1f * Vector2.Distance(XY(body[2]), XY(body[5]))
+                Vector2.Distance(XY(body[PoseLandmark.LeftEar]), XY(body[PoseLandmark.RightEar])),
+                2.1f * Vector2.Distance(XY(body[PoseLandmark.LeftEye]), XY(body[PoseLandmark.RightEye]))
             );
             if (headWidth > 4)
             {
-                var nose = XY(body[0]);
+                var nose = XY(body[PoseLandmark.Nose]);
                 if (Detect(new(nose, headWidth * 3.4f), .48f) is Crop head)
                     yield return head;
                 yield return new(nose, headWidth * 2.1f);
@@ -208,10 +238,10 @@ internal sealed class Tracker : IDisposable
             var raw = mesh.Image(image, c, false, "Identity", "Identity_1");
             if (BlazeDetector.Sigmoid(raw[1][0]) < .55f)
                 continue;
-            var points = Project(raw[0], c, mesh.Size, 3, 478);
+            var points = Project(raw[0], c, mesh.Size, 3, FaceLandmark.Count);
             if (
-                !Motion.Inside(points[1], image.Width, image.Height)
-                || points.Count(p => Motion.Inside(p, image.Width, image.Height)) < 239
+                !Motion.Inside(points[FaceLandmark.NoseTip], image.Width, image.Height)
+                || points.Count(p => Motion.Inside(p, image.Width, image.Height)) < FaceLandmark.Count / 2
             )
                 continue;
             var input = new float[subset.Length * 2];
@@ -220,7 +250,7 @@ internal sealed class Tracker : IDisposable
                 input[i * 2] = points[subset[i]].X;
                 input[i * 2 + 1] = points[subset[i]].Y;
             }
-            var eyes = points[263] - points[33];
+            var eyes = points[FaceLandmark.LeftEyeOuter] - points[FaceLandmark.RightEyeOuter];
             faceRegion = Bounds(points.Select(XY), MathF.Atan2(eyes.Y, eyes.X), 1.52f, 0);
             return (points, expressions.Run(input)[0]);
         }
@@ -242,9 +272,31 @@ internal sealed class Tracker : IDisposable
             var raw = hand.Image(image, region, false, "Identity", "Identity_1", "Identity_2");
             if (raw[1][0] < minPresence)
                 return null;
-            var points = Project(raw[0], region, hand.Size, 3, 21);
+            var points = Project(raw[0], region, hand.Size, 3, HandLandmark.Count);
             bool InFrame(int i) => Motion.Inside(points[i], image.Width, image.Height);
-            if (!InFrame(0) || !(InFrame(5) || InFrame(9) || InFrame(13) || InFrame(17)))
+            int basesInFrame =
+                (InFrame(HandLandmark.IndexBase) ? 1 : 0)
+                + (InFrame(HandLandmark.MiddleBase) ? 1 : 0)
+                + (InFrame(HandLandmark.RingBase) ? 1 : 0)
+                + (InFrame(HandLandmark.LittleBase) ? 1 : 0);
+            // A raised hand at a seated desk often has its wrist just below the frame. Keep the
+            // hand when its palm is in view and the wrist is only slightly outside; rejecting
+            // it made the arm drop and swing back while the hand was plainly visible.
+            float palm = Vector2.Distance(
+                XY(points[HandLandmark.Wrist]),
+                XY(points[HandLandmark.MiddleBase])
+            );
+            var wrist = points[HandLandmark.Wrist];
+            bool wristNear =
+                InFrame(HandLandmark.Wrist)
+                || (
+                    basesInFrame >= 3
+                    && wrist.X >= -palm * WristOutside
+                    && wrist.X < image.Width + palm * WristOutside
+                    && wrist.Y >= -palm * WristOutside
+                    && wrist.Y < image.Height + palm * WristOutside
+                );
+            if (!wristNear || basesInFrame == 0)
                 return null;
             float separation = Math.Max(6, Vector2.Distance(XY(points[0]), XY(points[9])) * .30f);
             if (
@@ -257,10 +309,10 @@ internal sealed class Tracker : IDisposable
             return new(raw[2][0], raw[1][0], points, trackedSide);
         }
         Vector2? PoseWrist(int side) =>
-            body.Length == 33
-            && visible[15 + side] >= .55f
-            && Motion.Inside(body[15 + side], image.Width, image.Height)
-                ? XY(body[15 + side])
+            body.Length == PoseLandmark.Count
+            && visible[PoseLandmark.LeftWrist + side] >= Motion.VisibleScore
+            && Motion.Inside(body[PoseLandmark.LeftWrist + side], image.Width, image.Height)
+                ? XY(body[PoseLandmark.LeftWrist + side])
                 : null;
 
         void Measure(Detection d)
@@ -294,14 +346,14 @@ internal sealed class Tracker : IDisposable
             if (detection != null)
                 Measure(detection);
         }
-        if (body.Length == 33 && candidates.Count < 2)
+        if (body.Length == PoseLandmark.Count && candidates.Count < 2)
         {
-            float shoulderSpan = Vector2.Distance(XY(body[11]), XY(body[12]));
+            float shoulderSpan = Vector2.Distance(XY(body[PoseLandmark.LeftShoulder]), XY(body[PoseLandmark.RightShoulder]));
             for (int side = 0; side < 2; side++)
             {
-                int wrist = 15 + side,
-                    elbow = 13 + side;
-                if (visible[wrist] < .55f || !Motion.Inside(body[wrist], image.Width, image.Height))
+                int wrist = PoseLandmark.LeftWrist + side,
+                    elbow = PoseLandmark.LeftElbow + side;
+                if (visible[wrist] < Motion.VisibleScore || !Motion.Inside(body[wrist], image.Width, image.Height))
                     continue;
                 var forearm = XY(body[wrist]) - XY(body[elbow]);
                 float span = Math.Max(shoulderSpan * .40f, forearm.Length());
@@ -355,11 +407,11 @@ internal sealed class Tracker : IDisposable
             {
                 if (
                     PoseWrist(side) is not { } wrist
-                    || visible[17 + side] < .55f
-                    || visible[19 + side] < .55f
+                    || visible[PoseLandmark.LeftPinky + side] < Motion.VisibleScore
+                    || visible[PoseLandmark.LeftIndex + side] < Motion.VisibleScore
                 )
                     continue;
-                var tips = (XY(body[17 + side]) + XY(body[19 + side])) / 2;
+                var tips = (XY(body[PoseLandmark.LeftPinky + side]) + XY(body[PoseLandmark.LeftIndex + side])) / 2;
                 var axis = tips - wrist;
                 float reach = axis.Length();
                 if (
@@ -409,8 +461,8 @@ internal sealed class Tracker : IDisposable
                 index < body.Length && index < visibility.Length && visibility[index] > .45f
                     ? Vector2.Distance(wrist, XY(body[index]))
                     : float.PositiveInfinity;
-            float leftDistance = LeftOrRightDistance(15);
-            float rightDistance = LeftOrRightDistance(16);
+            float leftDistance = LeftOrRightDistance(PoseLandmark.LeftWrist);
+            float rightDistance = LeftOrRightDistance(PoseLandmark.LeftWrist + 1);
             float nearest = Math.Min(leftDistance, rightDistance);
             if (
                 nearest < Math.Max(12, reach * .35f)

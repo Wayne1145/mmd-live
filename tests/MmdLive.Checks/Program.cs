@@ -28,6 +28,64 @@ internal static class Check
                     args.ElementAtOrDefault(5)
                 );
                 break;
+            case "jitter":
+                Jitter.Run(
+                    args[1],
+                    args[2],
+                    args.Contains("--full"),
+                    Array.IndexOf(args, "--frames") is >= 0 and var f ? args[f + 1] : null
+                );
+                break;
+            case "posecrop":
+                using (var video = new VideoCapture(args[1], VideoCaptureAPIs.FFMPEG))
+                using (var tracker = new MmdLive.Tracking.Tracker(Program.Models, GraphicsAdapter.List().First().Index))
+                using (var image = new Mat())
+                {
+                    var wanted = args[2].Split(',').Select(int.Parse).ToHashSet();
+                    for (int n = 0; video.Read(image) && !image.Empty(); n++)
+                    {
+                        var m = tracker.Track(image);
+                        if (!wanted.Contains(n) || tracker.LastBodyCrop is not { } c)
+                            continue;
+                        Console.WriteLine($"frame {n}: crop center ({c.Center.X:0},{c.Center.Y:0}) side {c.Side:0} angle {c.Angle * 180 / MathF.PI:0.0}");
+                        var corners = new[] { new System.Numerics.Vector2(0, 0), new(1, 0), new(1, 1), new(0, 1) }
+                            .Select(uv => c.Pixel(uv)).Select(p => new OpenCvSharp.Point((int)p.X, (int)p.Y)).ToArray();
+                        using var copy = image.Clone();
+                        Cv2.Polylines(copy, [corners], true, new Scalar(0, 0, 255), 6);
+                        if (m.Body.Length == 33)
+                            foreach (int k in new[] { 0, 7, 8, 11, 12, 13, 14, 15, 16 })
+                                Cv2.Circle(copy, new OpenCvSharp.Point((int)m.Body[k].X, (int)m.Body[k].Y), 14, new Scalar(255, 255, 0), -1);
+                        Cv2.ImWrite(Path.Combine(args[3], $"crop-{n:D3}.jpg"), copy);
+                    }
+                }
+                break;
+            case "bench":
+                using (var frame = Cv2.ImRead(args[1]))
+                    foreach (var file in Directory.GetFiles(Program.Models, "*.onnx").Order())
+                    {
+                        using var model = new MmdLive.Tracking.GpuModel(
+                            file,
+                            GraphicsAdapter.List().First().Index
+                        );
+                        if (model.Size == 0)
+                            continue;
+                        var crop = MmdLive.Tracking.Crop.Whole(frame);
+                        for (int i = 0; i < 10; i++)
+                            model.Image(frame, crop, false);
+                        var clock = System.Diagnostics.Stopwatch.StartNew();
+                        for (int i = 0; i < 100; i++)
+                            model.Image(frame, crop, false);
+                        Console.WriteLine(
+                            $"{Path.GetFileName(file), -32} {model.Size}px {clock.Elapsed.TotalMilliseconds / 100:0.00} ms"
+                        );
+                    }
+                break;
+            case "rigdump":
+                RigDump.Run(args[1], args[2], args[3], args.Contains("--full"));
+                break;
+            case "rigdiff":
+                RigDump.Compare(args[1], args[2]);
+                break;
             case "observe":
                 StabilityReplay.Observe(args[1], args[2], args.Length > 3 ? int.Parse(args[3]) : 0);
                 break;
@@ -123,14 +181,32 @@ internal static class Check
             character.Skin.All(x => Math.Abs(x.M11 - 1) < .00001f && Math.Abs(x.M41) < .0001f),
             "neutral skinning"
         );
-        var requested = new CameraMode(2560, 1440, 30);
+        var requested = new CameraMode(1920, 1080, 60);
         Require(
-            CameraMode.Prefer([new(1920, 1080, 60), new(2560, 1440, 15), requested]) == requested,
-            "1440p native mode selection"
+            CameraMode.Prefer([new(2560, 1440, 30), new(2560, 1440, 15), requested]) == requested,
+            "a 60 fps mode must win over 1440p at 30 fps"
+        );
+        Require(
+            CameraMode.Prefer([new(1280, 720, 60), new(1920, 1080, 60), new(1920, 1080, 30)])
+                == requested,
+            "the largest 60 fps mode must win"
+        );
+        Require(
+            CameraMode.Prefer([new(2560, 1440, 30), new(1920, 1080, 30)])?.Width == 2560,
+            "without 60 fps, 1440p at 30 fps remains the native choice"
         );
         Require(
             CameraMode.Prefer([new(1280, 720, 30), new(1920, 1080, 30)])?.Width == 1920,
             "camera mode fallback"
+        );
+        Require(
+            CameraMode.Prefer([new(2560, 1440, 10), new(1920, 1080, 30)])
+                == new CameraMode(1920, 1080, 30),
+            "a slow 1440p mode must lose to 1080p at 30 fps"
+        );
+        Require(
+            CameraMode.Prefer([new(2560, 1440, 15), new(640, 480, 30)])?.Width == 2560,
+            "frame rate must not drop below 720p"
         );
         var expression = new float[52];
         expression[9] = 1;

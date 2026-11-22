@@ -5,14 +5,23 @@ namespace MmdLive;
 
 internal sealed record CameraMode(int Width, int Height, double Fps)
 {
+    // Motion smoothness depends on the sample rate more than on pixels. Among modes of at least
+    // 720p, prefer 60 fps, then 30 fps, then the size closest to 1440p. The render loop runs at
+    // 60 Hz, so a 60 fps camera gives one fresh observation per presented frame.
     internal static CameraMode? Prefer(IEnumerable<CameraMode> modes) =>
         modes
             .Where(m => m.Width > 0 && m.Height > 0 && m.Fps > 0)
             .OrderBy(m =>
+                m.Height < 720 ? 4
+                : m.Fps >= 59 ? 0
+                : m.Fps >= 29 ? 1
+                : m.Fps >= 20 ? 2
+                : 3
+            )
+            .ThenBy(m =>
                 Math.Abs(Math.Log(m.Width / 2560.0)) + Math.Abs(Math.Log(m.Height / 1440.0))
             )
-            .ThenBy(m => m.Fps < 29 ? 1 : 0)
-            .ThenBy(m => Math.Abs(m.Fps - 30))
+            .ThenBy(m => Math.Abs(m.Fps - 60))
             .FirstOrDefault();
 }
 
@@ -180,7 +189,7 @@ internal static class CameraDevices
 
     internal static void Open(VideoCapture capture, int index)
     {
-        var preferred = CameraMode.Prefer(Modes(index)) ?? new CameraMode(2560, 1440, 30);
+        var preferred = CameraMode.Prefer(Modes(index)) ?? new CameraMode(1920, 1080, 60);
         if (!capture.Open(index, VideoCaptureAPIs.MSMF))
             throw new IOException("无法访问摄像头。请检查 Windows 摄像头权限与设备占用。");
         capture.Set(VideoCaptureProperties.FrameWidth, preferred.Width);

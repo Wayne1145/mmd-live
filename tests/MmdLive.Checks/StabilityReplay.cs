@@ -20,6 +20,8 @@ internal static class StabilityReplay
             GraphicsAdapter.List().First().Index
         );
         using var writer = File.CreateText(output);
+        int frames = 0;
+        double tracked = 0;
         if (repeats > 0)
         {
             using var still = Cv2.ImRead(file);
@@ -37,8 +39,16 @@ internal static class StabilityReplay
             while (video.Read(image) && !image.Empty())
                 Write(image);
         }
-        void Write(Mat image) =>
-            writer.WriteLine(JsonSerializer.Serialize(tracker.Track(image), Json));
+        Console.WriteLine($"{frames} frames, {tracked / Math.Max(1, frames):0.00} ms per Track");
+        Console.WriteLine(tracker.Profile(frames));
+        void Write(Mat image)
+        {
+            long start = System.Diagnostics.Stopwatch.GetTimestamp();
+            var motion = tracker.Track(image);
+            tracked += System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+            frames++;
+            writer.WriteLine(JsonSerializer.Serialize(motion, Json));
+        }
     }
 
     internal static void Run(

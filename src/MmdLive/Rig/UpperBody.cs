@@ -15,18 +15,7 @@ internal sealed partial class AvatarRig
 
     void PrepareArms()
     {
-        arms = new[] { ("左", "left"), ("右", "right") }
-            .Select(side => new ArmChain(
-                Bone(side.Item1 + "腕", side.Item2 + "arm", side.Item2 + "upperarm"),
-                Bone(
-                    side.Item1 + "ひじ",
-                    side.Item1 + "肘",
-                    side.Item2 + "elbow",
-                    side.Item2 + "lowerarm"
-                ),
-                Bone(side.Item1 + "手首", side.Item2 + "wrist", side.Item2 + "hand")
-            ))
-            .ToArray();
+        arms = map.Sides.Select(side => new ArmChain(side.Arm, side.Elbow, side.Wrist)).ToArray();
         var parents = new HashSet<int>();
         foreach (var arm in arms)
             if (arm.Shoulder >= 0)
@@ -46,6 +35,36 @@ internal sealed partial class AvatarRig
         }
         shoulderParents = order.Where(parents.Contains).ToArray();
         remainingBones = order.Where(i => !parents.Contains(i)).ToArray();
+        PrepareIdleArms();
+    }
+
+    // Local rotations an unobserved arm relaxes to: upper arm hanging slightly out from the
+    // body, forearm bent a little forward. Most MMD models are rigged in a T-pose, and relaxing
+    // to the bind pose left a seated performer's avatar with both arms straight out.
+    readonly Dictionary<int, Quaternion> idlePose = [];
+
+    void PrepareIdleArms()
+    {
+        idlePose.Clear();
+        foreach (var arm in arms)
+        {
+            if (arm.Shoulder < 0 || arm.Elbow < 0 || arm.Wrist < 0)
+                continue;
+            var upperRest = Model.Bones[arm.Elbow].Position - Model.Bones[arm.Shoulder].Position;
+            var lowerRest = Model.Bones[arm.Wrist].Position - Model.Bones[arm.Elbow].Position;
+            if (upperRest.LengthSquared() < 1e-8f || lowerRest.LengthSquared() < 1e-8f)
+                continue;
+            float outward = upperRest.X >= 0 ? 1 : -1;
+            // Model space: +Y up, the avatar faces -Z.
+            var upper = Quaternion.Normalize(
+                FromTo(upperRest, Vector3.Normalize(new(outward * .3f, -1, -.06f)))
+            );
+            var forearm = Vector3.Normalize(new(outward * .12f, -1, -.45f));
+            idlePose[arm.Shoulder] = upper;
+            idlePose[arm.Elbow] = Quaternion.Normalize(
+                FromTo(lowerRest, Vector3.Transform(forearm, Quaternion.Inverse(upper)))
+            );
+        }
     }
 
     static Vector2 XY(Vector3 p) => new(p.X, p.Y);
@@ -238,7 +257,11 @@ internal sealed partial class AvatarRig
                     ? (m.WorldBody[wrist].Z - m.WorldBody[shoulder].Z)
                         * Vector3.Distance(left, right)
                         / worldSpan
-                    : -.22f * maxReach;
+                    // Without a measured depth keep the arm's current depth. Resetting to a
+                    // default threw the arm forward or back whenever hand and pose disagreed.
+                    : previous is { } held
+                        ? held.Upper.Z + held.Lower.Z
+                        : -.22f * maxReach;
             Vector3? elbowHint = null;
             if (reliableElbow)
             {
