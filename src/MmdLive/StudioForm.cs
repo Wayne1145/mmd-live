@@ -36,10 +36,13 @@ internal sealed class OutputWindow : Form
 internal sealed class StudioForm : Form
 {
     readonly OutputWindow output = new();
-    readonly TabControl tabs = new() { Dock = DockStyle.Fill };
-    readonly TabPage previewPage = new("追踪预览") { BackColor = Color.White };
     readonly TrackingPreview preview = new();
-    readonly CheckBox showBones = new() { Text = "显示骨骼", AutoSize = true };
+    readonly CheckBox showBones = new()
+    {
+        Text = "显示骨骼",
+        AutoSize = true,
+        Margin = new Padding(0, 7, 12, 0),
+    };
     readonly TextBox boneNames = new()
     {
         Dock = DockStyle.Bottom,
@@ -56,17 +59,44 @@ internal sealed class StudioForm : Form
     long lastPreview;
     bool previewDirty = true;
     readonly ComboBox adapter = Choice(),
-        camera = Choice(),
-        mode = Choice(),
-        lightSelector = Choice();
-    readonly NumericUpDown azimuth = Number(-180, 180),
-        elevation = Number(-90, 90),
-        power = Number(0, 250),
-        zoom = Number(50, 200);
-    readonly Button color = ButtonFor("选择颜色");
+        camera = Choice();
+    readonly Segmented source = new("摄像头", "视频文件", "图片"),
+        mode = new("半身", "全身"),
+        lightSelector = new("主光", "补光", "轮廓光");
+    readonly Slider azimuth = new("水平方位", -180, 180, "°"),
+        elevation = new("仰角", -90, 90, "°"),
+        power = new("强度", 0, 250, "%"),
+        zoom = new("缩放", 50, 200, "%");
+    readonly Button color = ButtonFor("光色"),
+        startStop = new()
+        {
+            Height = 44,
+            Dock = DockStyle.Top,
+            FlatStyle = FlatStyle.Flat,
+            Font = new Font("Microsoft YaHei UI", 11f, FontStyle.Bold),
+            ForeColor = Color.White,
+            Cursor = Cursors.Hand,
+            AccessibleName = "开始或停止输入",
+            Margin = new Padding(0, 4, 0, 4),
+        },
+        chooseFile = ButtonFor("选择文件…");
     readonly Label modelName = ValueLabel(),
+        modelStats = Hint(""),
+        fileName = Hint("尚未选择文件"),
+        noCamera = Hint(""),
         trackingState = ValueLabel(),
-        trackingDetails = ValueLabel();
+        trackingDetails = ValueLabel(),
+        notice = Hint("");
+    readonly StatusChip faceChip = new("脸"),
+        bodyChip = new("身体"),
+        leftHandChip = new("左手"),
+        rightHandChip = new("右手");
+    readonly Panel cameraRow = new() { Height = 36, Margin = new Padding(0, 0, 0, 4) },
+        fileRow = new() { Height = 36, Margin = new Padding(0, 0, 0, 4), Visible = false };
+    readonly ToolTip tips = new() { InitialDelay = 300, AutoPopDelay = 12000 };
+    string? chosenVideo,
+        chosenImage;
+    bool inputActive;
     readonly PlaybackMetrics? metrics;
     bool rendering;
     long nextFrame;
@@ -103,144 +133,14 @@ internal sealed class StudioForm : Form
             );
         Directory.CreateDirectory(settingsPath);
         Text = "MMD Live · 控制台";
-        ClientSize = new Size(860, 640);
-        MinimumSize = new Size(540, 560);
+        ClientSize = new Size(1180, 740);
+        MinimumSize = new Size(960, 620);
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Microsoft YaHei UI", 9f);
-        BackColor = Color.FromArgb(245, 246, 243);
-        ForeColor = Color.FromArgb(27, 44, 46);
-        var main = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            Padding = new Padding(22, 16, 22, 12),
-            ColumnCount = 1,
-            RowCount = 4,
-        };
-        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
-        main.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-        Controls.Add(main);
-        var title = new Label
-        {
-            Text = "MMD Live",
-            Dock = DockStyle.Fill,
-            Font = new Font("Inter", 22, FontStyle.Bold),
-            TextAlign = ContentAlignment.MiddleLeft,
-        };
-        main.Controls.Add(title, 0, 0);
-        main.Controls.Add(tabs, 0, 1);
-        var session = Sheet(tabs, "直播控制");
-        tabs.TabPages.Add(previewPage);
-        var lights = Sheet(tabs, "虚拟灯光");
-        var previewBar = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Top,
-            Height = 39,
-            Padding = new Padding(8, 5, 3, 2),
-            WrapContents = false,
-        };
-        previewBar.Controls.Add(showBones);
-        foreach (
-            var (text, ink) in new[]
-            {
-                ("青色 · 真人追踪", Color.FromArgb(0, 104, 96)),
-                ("橙色 · 模型驱动", Color.FromArgb(145, 77, 2)),
-            }
-        )
-            previewBar.Controls.Add(
-                new Label
-                {
-                    Text = text,
-                    ForeColor = ink,
-                    AutoSize = true,
-                    Margin = new Padding(9, 4, 0, 0),
-                }
-            );
-        var stopPreview = ButtonFor("停止输入");
-        stopPreview.Margin = new Padding(10, 0, 0, 0);
-        stopPreview.Click += (_, _) => StopInput();
-        previewBar.Controls.Add(stopPreview);
-        previewPage.Controls.Add(preview);
-        previewPage.Controls.Add(boneNames);
-        previewPage.Controls.Add(previewBar);
-        showBones.CheckedChanged += (_, _) =>
-        {
-            preview.ShowBones = showBones.Checked;
-            boneNames.Visible = showBones.Checked;
-            SetBoneNames("");
-            previewDirty = true;
-            if (!loading)
-                profile.ShowBones = showBones.Checked;
-        };
-        tabs.SelectedIndexChanged += (_, _) => UpdatePreviewVisibility();
-        Resize += (_, _) => UpdatePreviewVisibility();
-        void Row(TableLayoutPanel panel, string name, Control value)
-        {
-            int r = panel.RowCount++;
-            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 45));
-            panel.Controls.Add(
-                new Label
-                {
-                    Text = name,
-                    AutoSize = true,
-                    Anchor = AnchorStyles.Left,
-                },
-                0,
-                r
-            );
-            value.Anchor = AnchorStyles.Left | AnchorStyles.Right;
-            panel.Controls.Add(value, 1, r);
-        }
-        Row(session, "图形设备", adapter);
-        Row(session, "当前角色", modelName);
-        Row(session, "角色", ActionRow(("打开模型…", OpenModel), ("绑定设置…", EditMapping)));
-        Row(
-            session,
-            "文件输入",
-            ActionRow(("导入图片…", () => OpenSource(false)), ("播放视频…", () => OpenSource(true)))
-        );
-        camera.Items.Add("先读取设备列表");
-        camera.SelectedIndex = 0;
-        Row(session, "摄像头", camera);
-        Row(
-            session,
-            "设备控制",
-            ActionRow(
-                ("读取设备列表", RefreshCameras),
-                ("开始摄像头", StartCamera),
-                ("停止输入", StopInput)
-            )
-        );
-        mode.Items.AddRange(["半身", "全身"]);
-        mode.SelectedIndex = 0;
-        Row(session, "画面构图", mode);
-        zoom.Value = 100;
-        Row(session, "缩放 (%)", zoom);
-        Row(session, "追踪", ActionRow(("校准中性姿势", Calibrate), ("显示输出窗口", () =>
-                {
-                    output.Show();
-                    output.Activate();
-                })));
-        lightSelector.Items.AddRange(["主光", "补光", "轮廓光"]);
-        lightSelector.SelectedIndex = 0;
-        Row(lights, "灯光", lightSelector);
-        Row(lights, "水平方位 (°)", azimuth);
-        Row(lights, "仰角 (°)", elevation);
-        Row(lights, "强度 (%)", power);
-        Row(lights, "光色", color);
-        var reset = ButtonFor("恢复默认灯光");
-        reset.Click += (_, _) =>
-        {
-            profile.Lights = new();
-            RefreshLight();
-            ApplyProfile();
-        };
-        Row(lights, "预设", reset);
-        trackingState.Dock = trackingDetails.Dock = DockStyle.Fill;
-        main.Controls.Add(trackingState, 0, 2);
-        main.Controls.Add(trackingDetails, 0, 3);
-        trackingDetails.ForeColor = Color.FromArgb(60, 95, 89);
+        BackColor = Theme.Surface;
+        ForeColor = Theme.Ink;
+        BuildLayout();
+        Load += (_, _) => ScaleForDpi(this);
         var gpus = GraphicsAdapter.List();
         if (gpus.Count == 0)
             throw new InvalidOperationException("未找到 Direct3D 硬件显卡");
@@ -248,11 +148,14 @@ internal sealed class StudioForm : Form
             adapter.Items.Add(gpu);
         adapter.SelectedIndex = 0;
         mode.SelectedIndexChanged += (_, _) => ApplyProfile();
-        zoom.ValueChanged += (_, _) => ApplyProfile();
+        zoom.Bar.ValueChanged += (_, _) => ApplyProfile();
         lightSelector.SelectedIndexChanged += (_, _) => RefreshLight();
-        azimuth.ValueChanged += (_, _) => ChangeLight();
-        elevation.ValueChanged += (_, _) => ChangeLight();
-        power.ValueChanged += (_, _) => ChangeLight();
+        azimuth.Bar.ValueChanged += (_, _) => ChangeLight();
+        elevation.Bar.ValueChanged += (_, _) => ChangeLight();
+        power.Bar.ValueChanged += (_, _) => ChangeLight();
+        source.SelectedIndexChanged += (_, _) => UpdateInputUi();
+        startStop.Click += (_, _) => ToggleInput();
+        chooseFile.Click += (_, _) => ChooseFile();
         color.Click += (_, _) =>
         {
             using var picker = new ColorDialog
@@ -281,6 +184,12 @@ internal sealed class StudioForm : Form
             await WithSwitch(async () =>
             {
                 var area = Screen.FromControl(this).WorkingArea;
+                // After DPI scaling the default size can exceed a small screen.
+                Size = new Size(Math.Min(Width, area.Width * 9 / 10), Math.Min(Height, area.Height * 9 / 10));
+                Location = new Point(
+                    area.Left + (area.Width - Width) / 2,
+                    area.Top + (area.Height - Height) / 2
+                );
                 output.Location = new Point(
                     Math.Max(area.Left, area.Right - output.Width - 22),
                     area.Top + 42
@@ -288,6 +197,7 @@ internal sealed class StudioForm : Form
                 output.Show();
                 modelFile = Arg("--model") ?? Program.Demo;
                 await RebuildRenderer();
+                RefreshCameras();
                 if (Arg("--image") is { } photo)
                     await StartInput(new(SourceKind.Image, photo));
                 if (Arg("--video") is { } movie)
@@ -307,15 +217,23 @@ internal sealed class StudioForm : Form
         };
     }
 
-    static ComboBox Choice() => new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 250 };
+    const int SidebarWidth = 300;
 
-    static NumericUpDown Number(int min, int max) =>
+    // Fonts follow the monitor DPI but code-built layouts do not auto-scale here, so fixed
+    // sizes (written for 96 DPI) clipped their text at 150-200%. Scale them once on load.
+    internal static void ScaleForDpi(Control root)
+    {
+        float factor = root.DeviceDpi / 96f;
+        if (factor > 1.01f)
+            root.Scale(new SizeF(factor, factor));
+    }
+
+    static ComboBox Choice() =>
         new()
         {
-            Minimum = min,
-            Maximum = max,
-            Width = 120,
-            TextAlign = HorizontalAlignment.Right,
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            Dock = DockStyle.Fill,
+            FlatStyle = FlatStyle.System,
         };
 
     static Label ValueLabel() =>
@@ -326,48 +244,391 @@ internal sealed class StudioForm : Form
             Height = 25,
         };
 
-    static Button ButtonFor(string text) =>
+    static Label Hint(string text) =>
         new()
         {
             Text = text,
+            ForeColor = Theme.Muted,
             AutoSize = true,
-            Height = 30,
-            Padding = new Padding(4, 0, 4, 0),
+            MaximumSize = new Size(SidebarWidth, 0),
+            Margin = new Padding(0, 0, 0, 6),
         };
 
-    static Control ActionRow(params (string label, Action action)[] actions)
+    static Button ButtonFor(string text)
     {
-        var row = new FlowLayoutPanel
+        var b = new Button
         {
-            Height = 38,
-            WrapContents = false,
-            Margin = Padding.Empty,
+            Text = text,
+            Height = 32,
+            Margin = new Padding(0, 0, 6, 0),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Theme.Panel,
+            Cursor = Cursors.Hand,
         };
-        foreach (var (label, action) in actions)
+        b.FlatAppearance.BorderColor = Theme.Border;
+        return b;
+    }
+
+    // Buttons share the sidebar width equally, one row high.
+    static TableLayoutPanel ButtonRow(params Button[] buttons)
+    {
+        var row = new TableLayoutPanel
         {
-            var b = ButtonFor(label);
-            b.Click += (_, _) => action();
-            row.Controls.Add(b);
+            ColumnCount = Math.Max(2, buttons.Length),
+            RowCount = 1,
+            Height = 34,
+            Margin = new Padding(0, 0, 0, 6),
+        };
+        row.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        for (int i = 0; i < row.ColumnCount; i++)
+            row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / row.ColumnCount));
+        for (int i = 0; i < buttons.Length; i++)
+        {
+            buttons[i].Dock = DockStyle.Fill;
+            buttons[i].Margin = new Padding(i == 0 ? 0 : 3, 0, i == buttons.Length - 1 ? 0 : 3, 0);
+            row.Controls.Add(buttons[i], i, 0);
         }
         return row;
     }
 
-    static TableLayoutPanel Sheet(TabControl tabs, string name)
+    Button Action(string text, Action action, string? tip = null)
     {
-        var page = new TabPage(name) { BackColor = Color.White };
-        tabs.TabPages.Add(page);
-        var table = new TableLayoutPanel
+        var b = ButtonFor(text);
+        b.Click += (_, _) => action();
+        if (tip != null)
+            tips.SetToolTip(b, tip);
+        return b;
+    }
+
+    // A titled group in the sidebar. Children stretch to the sidebar width.
+    static Control Section(string title, params Control[] rows)
+    {
+        var box = new TableLayoutPanel
+        {
+            ColumnCount = 1,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Margin = new Padding(0, 0, 0, 10),
+            Padding = new Padding(0, 0, 0, 10),
+        };
+        box.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, SidebarWidth));
+        box.Controls.Add(
+            new Label
+            {
+                Text = title,
+                AutoSize = true,
+                Font = new Font("Microsoft YaHei UI", 10f, FontStyle.Bold),
+                ForeColor = Theme.Accent,
+                Margin = new Padding(0, 6, 0, 8),
+            }
+        );
+        foreach (var row in rows)
+        {
+            if (row is not Label)
+                row.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+            box.Controls.Add(row);
+        }
+        // A hairline under each group.
+        box.Paint += (_, e) =>
+        {
+            using var pen = new Pen(Theme.Border);
+            e.Graphics.DrawLine(pen, 0, box.Height - 1, box.Width, box.Height - 1);
+        };
+        return box;
+    }
+
+    static Control Labeled(string label, Control value)
+    {
+        var row = new TableLayoutPanel
+        {
+            ColumnCount = 2,
+            RowCount = 1,
+            Height = 34,
+            Margin = new Padding(0, 0, 0, 4),
+        };
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 64));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        row.Controls.Add(
+            new Label
+            {
+                Text = label,
+                AutoSize = true,
+                Anchor = AnchorStyles.Left,
+            },
+            0,
+            0
+        );
+        value.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+        row.Controls.Add(value, 1, 0);
+        return row;
+    }
+
+    void BuildLayout()
+    {
+        var root = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 0,
-            AutoScroll = true,
-            Padding = new Padding(12),
+            RowCount = 1,
         };
-        table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 104));
-        table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        page.Controls.Add(table);
-        return table;
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, SidebarWidth + 44));
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        Controls.Add(root);
+
+        // Sidebar: everything the performer sets up, top to bottom in the order it is needed.
+        var sidebar = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            AutoScroll = true,
+            BackColor = Theme.Panel,
+            Padding = new Padding(18, 10, 8, 12),
+            Margin = Padding.Empty,
+        };
+        root.Controls.Add(sidebar, 0, 0);
+        sidebar.Controls.Add(
+            new Label
+            {
+                Text = "MMD Live",
+                AutoSize = true,
+                Font = new Font("Microsoft YaHei UI", 15f, FontStyle.Bold),
+                Margin = new Padding(0, 2, 0, 8),
+            }
+        );
+
+        var refresh = Action("刷新", RefreshCameras, "重新读取已连接的摄像头");
+        refresh.Dock = DockStyle.Right;
+        camera.Dock = DockStyle.Fill;
+        cameraRow.Controls.Add(camera);
+        cameraRow.Controls.Add(refresh);
+        chooseFile.Dock = DockStyle.Right;
+        fileName.Dock = DockStyle.Fill;
+        fileName.AutoSize = false;
+        fileName.AutoEllipsis = true;
+        fileName.TextAlign = ContentAlignment.MiddleLeft;
+        fileRow.Controls.Add(fileName);
+        fileRow.Controls.Add(chooseFile);
+        tips.SetToolTip(startStop, "开始或停止当前输入源");
+        sidebar.Controls.Add(Section("输入源", source, cameraRow, noCamera, fileRow, startStop));
+
+        modelName.Font = new Font("Microsoft YaHei UI", 10f, FontStyle.Bold);
+        modelName.Height = 26;
+        sidebar.Controls.Add(
+            Section(
+                "角色",
+                modelName,
+                modelStats,
+                ButtonRow(
+                    Action("打开模型…", OpenModel, "载入 .pmx 或 .pmd 角色"),
+                    Action("绑定设置…", EditMapping, "骨骼或表情名不标准时，手动指定对应名称")
+                )
+            )
+        );
+
+        sidebar.Controls.Add(
+            Section(
+                "画面",
+                mode,
+                zoom,
+                ButtonRow(
+                    Action(
+                        "显示输出窗口",
+                        () =>
+                        {
+                            output.Show();
+                            output.Activate();
+                        }
+                    )
+                ),
+                Hint("OBS：游戏捕获 → 捕获特定窗口 → 「MMD Live — OBS Output」，勾选「允许透明」")
+            )
+        );
+
+        sidebar.Controls.Add(
+            Section(
+                "追踪",
+                ButtonRow(Action("校准中性姿势", Calibrate)),
+                Hint("正对镜头、表情放松时点击，角色会以此为默认表情和姿势。"),
+                notice
+            )
+        );
+
+        color.TextAlign = ContentAlignment.MiddleCenter;
+        sidebar.Controls.Add(
+            Section(
+                "灯光",
+                lightSelector,
+                azimuth,
+                elevation,
+                power,
+                Labeled("光色", color),
+                ButtonRow(
+                    Action(
+                        "恢复默认灯光",
+                        () =>
+                        {
+                            profile.Lights = new();
+                            RefreshLight();
+                            ApplyProfile();
+                        }
+                    )
+                )
+            )
+        );
+
+        sidebar.Controls.Add(Section("高级", Labeled("显卡", adapter)));
+        notice.Visible = false;
+        // Scaling and focus can leave the sidebar scrolled; always open at the input section.
+        Shown += (_, _) => sidebar.AutoScrollPosition = Point.Empty;
+
+        // Stage: tracking status on top, the live preview below.
+        var stage = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            Padding = new Padding(14, 10, 16, 14),
+            Margin = Padding.Empty,
+        };
+        stage.RowStyles.Add(new RowStyle(SizeType.Absolute, 70));
+        stage.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        root.Controls.Add(stage, 1, 0);
+
+        var status = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            Margin = Padding.Empty,
+        };
+        var chips = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            WrapContents = false,
+            Margin = Padding.Empty,
+        };
+        chips.Controls.AddRange([faceChip, bodyChip, leftHandChip, rightHandChip]);
+        trackingDetails.AutoSize = true;
+        trackingDetails.ForeColor = Theme.Muted;
+        trackingDetails.Margin = new Padding(6, 6, 0, 0);
+        chips.Controls.Add(trackingDetails);
+        trackingState.Dock = DockStyle.Fill;
+        trackingState.Font = new Font("Microsoft YaHei UI", 10f);
+        status.Controls.Add(trackingState, 0, 0);
+        status.Controls.Add(chips, 0, 1);
+        stage.Controls.Add(status, 0, 0);
+
+        var previewHost = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = Theme.Panel,
+            Margin = Padding.Empty,
+            Padding = new Padding(1),
+        };
+        var previewBar = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            Height = 36,
+            Padding = new Padding(10, 2, 6, 0),
+            WrapContents = false,
+            BackColor = Theme.Panel,
+        };
+        previewBar.Controls.Add(showBones);
+        tips.SetToolTip(showBones, "对照真人关键点和角色骨骼，排查动作不对的部位");
+        foreach (
+            var (text, ink) in new[]
+            {
+                ("青色 · 真人追踪", Color.FromArgb(0, 104, 96)),
+                ("橙色 · 模型驱动", Color.FromArgb(145, 77, 2)),
+            }
+        )
+            previewBar.Controls.Add(
+                new Label
+                {
+                    Text = text,
+                    ForeColor = ink,
+                    AutoSize = true,
+                    Margin = new Padding(4, 8, 8, 0),
+                }
+            );
+        previewHost.Controls.Add(preview);
+        previewHost.Controls.Add(boneNames);
+        previewHost.Controls.Add(previewBar);
+        stage.Controls.Add(previewHost, 0, 1);
+
+        showBones.CheckedChanged += (_, _) =>
+        {
+            preview.ShowBones = showBones.Checked;
+            boneNames.Visible = showBones.Checked;
+            SetBoneNames("");
+            previewDirty = true;
+            if (!loading)
+                profile.ShowBones = showBones.Checked;
+        };
+        Resize += (_, _) => UpdatePreviewVisibility();
+        UpdateInputUi();
+    }
+
+    // Input source workflow: pick a source, then one button starts or stops it.
+    void UpdateInputUi()
+    {
+        bool cameraSource = source.SelectedIndex == 0;
+        cameraRow.Visible = cameraSource;
+        noCamera.Visible = cameraSource && noCamera.Text.Length > 0;
+        fileRow.Visible = !cameraSource;
+        var path = source.SelectedIndex == 1 ? chosenVideo : chosenImage;
+        fileName.Text = path is null ? "尚未选择文件" : Path.GetFileName(path);
+        tips.SetToolTip(fileName, path ?? "");
+        startStop.Text = inputActive ? "■  停止" : "▶  开始";
+        startStop.BackColor = inputActive ? Theme.Danger : Theme.Accent;
+        startStop.FlatAppearance.BorderSize = 0;
+    }
+
+    void ToggleInput()
+    {
+        if (inputActive)
+        {
+            StopInput();
+            return;
+        }
+        switch (source.SelectedIndex)
+        {
+            case 0:
+                StartCamera();
+                break;
+            case 1 when chosenVideo is { } video:
+                _ = WithSwitch(() => StartInput(new(SourceKind.Video, video)));
+                break;
+            case 2 when chosenImage is { } image:
+                _ = WithSwitch(() => StartInput(new(SourceKind.Image, image)));
+                break;
+            default:
+                ChooseFile();
+                break;
+        }
+    }
+
+    void ChooseFile()
+    {
+        bool video = source.SelectedIndex == 1;
+        using var d = new OpenFileDialog
+        {
+            Filter = video
+                ? "视频|*.mp4;*.mkv;*.avi;*.mov;*.webm"
+                : "图片|*.png;*.jpg;*.jpeg;*.bmp;*.webp",
+        };
+        if (d.ShowDialog(this) != DialogResult.OK || input == null)
+            return;
+        if (video)
+            chosenVideo = d.FileName;
+        else
+            chosenImage = d.FileName;
+        UpdateInputUi();
+        // Choosing a file means "use this now".
+        _ = WithSwitch(() =>
+            StartInput(new(video ? SourceKind.Video : SourceKind.Image, d.FileName))
+        );
     }
 
     async Task WithSwitch(Func<Task> action)
@@ -434,12 +695,16 @@ internal sealed class StudioForm : Form
         mode.SelectedIndex = profile.FullBody ? 1 : 0;
         showBones.Checked = profile.ShowBones;
         previewDirty = true;
-        zoom.Value = Math.Clamp((decimal)profile.Zoom * 100, 50, 200);
+        zoom.Value = (int)MathF.Round(profile.Zoom * 100);
         loading = false;
         RefreshLight();
         ApplyProfile();
-        modelName.Text =
-            $"{rig.Model.Name}   ·   {rig.Model.Bones.Count} 骨骼   ·   {rig.Model.Morphs.Count} 表情";
+        modelName.Text = string.IsNullOrWhiteSpace(rig.Model.Name)
+            ? Path.GetFileNameWithoutExtension(path)
+            : rig.Model.Name;
+        tips.SetToolTip(modelName, path);
+        modelStats.Text =
+            $"{rig.Model.Bones.Count} 根骨骼 · {rig.Model.Morphs.Count} 个表情 · {Path.GetFileName(path)}";
     }
 
     void OpenModel()
@@ -454,25 +719,10 @@ internal sealed class StudioForm : Form
             });
     }
 
-    void OpenSource(bool video)
-    {
-        using var d = new OpenFileDialog
-        {
-            Filter = video
-                ? "视频|*.mp4;*.mkv;*.avi;*.mov;*.webm"
-                : "图片|*.png;*.jpg;*.jpeg;*.bmp;*.webp",
-        };
-        if (d.ShowDialog(this) == DialogResult.OK && input != null)
-            _ = WithSwitch(() =>
-                StartInput(new(video ? SourceKind.Video : SourceKind.Image, d.FileName))
-            );
-    }
-
     void UpdatePreviewVisibility()
     {
         if (input != null)
-            input.PreviewVisible =
-                tabs.SelectedTab == previewPage && WindowState != FormWindowState.Minimized;
+            input.PreviewVisible = WindowState != FormWindowState.Minimized;
         previewDirty = true;
     }
 
@@ -480,10 +730,22 @@ internal sealed class StudioForm : Form
     {
         if (input == null)
             return;
-        tabs.SelectedTab = previewPage;
+        // Reflect the running source in the sidebar, including sources given on the command line.
+        this.source.SelectedIndex = source.Kind switch
+        {
+            SourceKind.Video => 1,
+            SourceKind.Image => 2,
+            _ => 0,
+        };
+        if (source.Kind == SourceKind.Video)
+            chosenVideo = source.Path;
+        else if (source.Kind == SourceKind.Image)
+            chosenImage = source.Path;
         preview.ClearFrame();
         UpdatePreviewVisibility();
         renderer?.Rig?.ResetLiveTracking();
+        inputActive = true;
+        UpdateInputUi();
         await input.Start(source);
     }
 
@@ -493,29 +755,33 @@ internal sealed class StudioForm : Form
             if (input != null)
                 await input.Stop();
             preview.ClearFrame();
+            inputActive = false;
+            UpdateInputUi();
         });
 
+    // Lists camera names only. A camera is opened when the performer presses Start.
     void RefreshCameras()
     {
+        string? previous = camera.SelectedItem as string;
         try
         {
             var list = CameraDevices.Names();
             camera.Items.Clear();
             camera.Items.AddRange(list);
             if (list.Length > 0)
-                camera.SelectedIndex = 0;
-            else
-                trackingState.Text = "没有可用摄像头";
+                camera.SelectedIndex = Math.Max(0, Array.IndexOf(list, previous));
+            noCamera.Text = list.Length > 0 ? "" : "没有检测到摄像头。接好摄像头后点「刷新」。";
         }
         catch (Exception e)
         {
-            trackingState.Text = e.Message;
+            noCamera.Text = "读取摄像头失败：" + e.GetBaseException().Message;
         }
+        UpdateInputUi();
     }
 
     void StartCamera()
     {
-        if (camera.SelectedIndex < 0 || camera.SelectedItem?.ToString() == "先读取设备列表")
+        if (camera.Items.Count == 0)
             RefreshCameras();
         if (camera.SelectedIndex >= 0 && input != null)
             _ = WithSwitch(() => StartInput(new(SourceKind.Camera, "", camera.SelectedIndex)));
@@ -527,10 +793,21 @@ internal sealed class StudioForm : Form
             return;
         rig.ResetPoseOrigin();
         if (input.Latest.Expressions.Length != 52)
+        {
+            Notify("校准需要先开始输入，并让脸完整出现在画面中。", Theme.Warning);
             return;
+        }
         renderer.Rig.Calibrate(input.Latest);
         profile.Neutral = renderer.Rig.Neutral;
         Save();
+        Notify($"已校准中性姿势（{DateTime.Now:HH:mm:ss}）", Theme.Accent);
+    }
+
+    void Notify(string text, Color ink)
+    {
+        notice.Text = text;
+        notice.ForeColor = ink;
+        notice.Visible = true;
     }
 
     void EditMapping()
@@ -575,11 +852,12 @@ internal sealed class StudioForm : Form
     {
         loading = true;
         var l = CurrentLight();
-        azimuth.Value = (decimal)l.Azimuth;
-        elevation.Value = (decimal)l.Elevation;
-        power.Value = (decimal)Math.Round(l.Power * 100);
+        azimuth.Value = (int)MathF.Round(l.Azimuth);
+        elevation.Value = (int)MathF.Round(l.Elevation);
+        power.Value = (int)MathF.Round(l.Power * 100);
         color.BackColor = Color.FromArgb(l.Rgb | unchecked((int)0xff000000));
         color.ForeColor = color.BackColor.GetBrightness() > .5 ? Color.Black : Color.White;
+        color.Text = $"#{l.Rgb & 0xffffff:X6}  ·  点击更改";
         loading = false;
     }
 
@@ -589,9 +867,9 @@ internal sealed class StudioForm : Form
             return;
         SetLight(
             new(
-                (float)azimuth.Value,
-                (float)elevation.Value,
-                (float)power.Value / 100,
+                azimuth.Value,
+                elevation.Value,
+                power.Value / 100f,
                 CurrentLight().Rgb
             )
         );
@@ -605,7 +883,7 @@ internal sealed class StudioForm : Form
         previewDirty = true;
         renderer.Lights = profile.Lights;
         renderer.FullBody = profile.FullBody = mode.SelectedIndex == 1;
-        renderer.Zoom = profile.Zoom = (float)zoom.Value / 100;
+        renderer.Zoom = profile.Zoom = zoom.Value / 100f;
     }
 
     void Save()
@@ -688,9 +966,13 @@ internal sealed class StudioForm : Form
         if (now - lastStatus >= 250)
         {
             lastStatus = now;
-            trackingState.Text = input.Status;
-            trackingDetails.Text =
-                $"脸 {m.Face.Length} 点     身体 {m.Body.Length} 点     手 {m.Hands.Length} 只     推理 {m.Milliseconds:0.0} ms";
+            bool live = sample.Stamp != 0;
+            trackingState.Text = inputActive || live ? input.Status : "未开始 · 在左侧选择输入源后点击「开始」";
+            faceChip.Set(live && m.Face.Length > 0);
+            bodyChip.Set(live && m.Body.Length > 0);
+            leftHandChip.Set(live && m.Hands.Any(h => h.Left));
+            rightHandChip.Set(live && m.Hands.Any(h => !h.Left));
+            trackingDetails.Text = live ? $"推理 {m.Milliseconds:0.0} ms" : "";
         }
     }
 }
@@ -705,6 +987,8 @@ internal sealed class MappingDialog : Form
         Text = "角色绑定";
         ClientSize = new Size(600, 460);
         StartPosition = FormStartPosition.CenterParent;
+        Font = new Font("Microsoft YaHei UI", 9f);
+        Load += (_, _) => StudioForm.ScaleForDpi(this);
         var tabs = new TabControl { Dock = DockStyle.Fill };
         Controls.Add(tabs);
         DataGridView Grid(

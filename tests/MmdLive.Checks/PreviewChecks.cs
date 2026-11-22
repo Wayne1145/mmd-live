@@ -108,9 +108,8 @@ internal static class PreviewChecks
         var controls = Children(studio).ToArray();
         var preview = controls.OfType<TrackingPreview>().Single();
         var check = controls.OfType<CheckBox>().Single(c => c.Text == "显示骨骼");
-        var stop = controls
-            .OfType<Button>()
-            .Single(c => c.Text == "停止输入" && c.Parent!.Parent == preview.Parent);
+        // One button starts and stops the selected source; while input runs it reads "停止".
+        var stop = controls.OfType<Button>().Single(c => c.AccessibleName == "开始或停止输入");
         var timer = new System.Windows.Forms.Timer { Interval = 140 };
         var clock = Stopwatch.StartNew();
         Exception? error = null;
@@ -134,7 +133,8 @@ internal static class PreviewChecks
                     return;
                 if (stage == 0 && preview.Sample.Detected.Face.Length == 478)
                 {
-                    Require(preview.Visible, "source start must select the preview tab");
+                    Require(preview.Visible, "source start must show the preview");
+                    Require(stop.Text.Contains("停止"), "a running source must offer to stop");
                     check.Checked = false;
                     firstStamp = preview.Sample.Stamp;
                     using var b = Grab(preview);
@@ -199,6 +199,7 @@ internal static class PreviewChecks
                 else if (stage == 3 && preview.Sample.Stamp == 0)
                 {
                     Require(!check.Checked, "checkbox state");
+                    Require(stop.Text.Contains("开始"), "a stopped source must offer to start again");
                     studio.Close();
                 }
                 else
